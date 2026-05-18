@@ -1,18 +1,13 @@
 """Loads the models and runs the RAG QA pipeline.
 
-NLPManager owns the models, builds the retrieval index when the corpus arrives
-(load_corpus), and answers questions (qa / qa_batch).
-
-Generation uses vLLM: continuous batching, PagedAttention and automatic prefix
-caching make batched inference far faster than a per-call HF pipeline.
+NLPManager owns the three models, builds the retrieval index when the corpus
+arrives (load_corpus), and answers questions (qa).
 """
-import glob
-import os
 import re
 
 import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
-from vllm import LLM, SamplingParams
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from chunking import chunk_corpus
 from retrieval import Retriever
@@ -22,13 +17,17 @@ PHI_MODEL_ID = "microsoft/Phi-4-mini-instruct"
 EMBEDDER_ID = "BAAI/bge-large-en-v1.5"
 RERANKER_ID = "BAAI/bge-reranker-v2-m3"
 
-# Tunable pipeline constants.
-MAX_CONTEXT_TOKENS = 1024   # top reranked chunks; small prompt = fast prefill
+# Tunable pipeline constants (adjusted in Task 11 using eval_local.py).
+# 1600-token context covers the top ~4-5 reranked chunks (the answer is almost
+# always in the top 1-3); the smaller prompt speeds up prefill markedly.
+MAX_CONTEXT_TOKENS = 1024
 MAX_NEW_TOKENS = 256
-# Fraction of GPU memory vLLM reserves (weights + KV cache). The rest holds the
-# embedder + reranker (~1.2 GB) and CUDA overhead on the 15 GB T4.
-GPU_MEM_FRACTION = 0.70
-MAX_MODEL_LEN = 3072
+# Questions per batched generation pass. Batched generation is the main speed
+# lever; 4 matches the request batch size and is VRAM-safe on the 15 GB T4.
+GEN_BATCH_SIZE = 4
+# Return "" only if the best reranked chunk scores below this. Default 0.0
+# disables the empty-answer path (all local questions are answerable).
+EMPTY_ANSWER_RERANK_THRESHOLD = 0.0
 
 _FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER:\s*(.*)", re.IGNORECASE | re.DOTALL)
 
@@ -51,15 +50,6 @@ def _normalize_answer(answer: str) -> str:
     answer = _SP_HYPHEN.sub(r"\1-\2", answer)
     return answer.strip()
 
-
-def _resolve_model_path(repo_id: str) -> str:
-    """Return the local HF-cache snapshot directory for a repo, else the id."""
-    cache = os.path.join(
-        MODELS_DIR, "models--" + repo_id.replace("/", "--"), "snapshots")
-    snaps = sorted(glob.glob(os.path.join(cache, "*")))
-    return snaps[-1] if snaps else repo_id
-
-
 SYSTEM_PROMPT = (
     "You answer questions about the fictional world of Clairos using ONLY the "
     "provided SOURCES.\n"
@@ -80,6 +70,8 @@ SYSTEM_PROMPT = (
 
 # Few-shot turns teach the answer format: ultra-terse, exact casing preserved,
 # and that reasoning questions are computed step by step before the result.
+# Two examples (one terse L1 lookup, one L2 calculation) — kept short to keep
+# the prompt (and prefill cost) small.
 FEWSHOT = [
     {"role": "user", "content": (
         "SOURCES:\nSource doc_0: ONE Network Enterprises referred to the "
@@ -99,39 +91,37 @@ FEWSHOT = [
 
 
 class NLPManager:
-    """RAG QA pipeline: hybrid retrieval + vLLM (Phi-4-mini) generation."""
+    """RAG QA pipeline: retrieval + Phi-4-mini generation."""
 
     loaded = False
 
     def __init__(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(">>> NLPManager: loading generator", flush=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            PHI_MODEL_ID, cache_dir=MODELS_DIR, local_files_only=True)
+        # Batched generation needs a pad token and left padding (decoder-only).
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            PHI_MODEL_ID, cache_dir=MODELS_DIR, local_files_only=True,
+            device_map="auto", torch_dtype=torch.float16,
+            attn_implementation="sdpa")
+        self.pipe = pipeline("text-generation", model=self.model,
+                             tokenizer=self.tokenizer)
 
-        # vLLM is constructed first so it can reserve its memory pool; the
-        # embedder + reranker then load into the remaining GPU memory.
-        print(">>> NLPManager: loading vLLM generator", flush=True)
-        # enforce_eager: skip CUDA-graph capture — frees ~1.5 GB of VRAM for the
-        # KV cache (the T4 is memory-tight) and speeds engine startup. Continuous
-        # batching + PagedAttention remain the dominant speed wins.
-        self.llm = LLM(
-            model=_resolve_model_path(PHI_MODEL_ID),
-            dtype="float16",
-            gpu_memory_utilization=GPU_MEM_FRACTION,
-            max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
-        )
-        self.tokenizer = self.llm.get_tokenizer()
-        self.sampling = SamplingParams(temperature=0.0, max_tokens=MAX_NEW_TOKENS)
-
-        # Load the helper models directly in fp16 (via model_kwargs) rather than
-        # fp32-then-.half() — the fp32 peak would OOM the VRAM-tight T4.
         print(">>> NLPManager: loading embedder + reranker", flush=True)
-        fp16 = {"torch_dtype": torch.float16} if device == "cuda" else {}
         self.embedder = SentenceTransformer(
             EMBEDDER_ID, cache_folder=MODELS_DIR, local_files_only=True,
-            device=device, model_kwargs=fp16)
+            device=device)
         self.reranker = CrossEncoder(
             RERANKER_ID, cache_folder=MODELS_DIR, local_files_only=True,
-            device=device, model_kwargs=fp16)
+            device=device)
+        # fp16 for the helper models keeps total VRAM within the T4's 15 GB.
+        if device == "cuda":
+            self.embedder.half()
+            self.reranker.model.half()
 
         self.retriever = Retriever(self.embedder, self.reranker)
         self.doc_ids = []  # corpus-position -> document id, set by load_corpus
@@ -173,6 +163,34 @@ class NLPManager:
             used += len(ids)
         return "\n\n".join(f"Source doc_{i}: {t}" for i, t in enumerate(parts))
 
+    @staticmethod
+    def _parse_answer(text):
+        """Extract and normalize the answer after the last 'FINAL ANSWER:' marker."""
+        matches = list(_FINAL_ANSWER_RE.finditer(text))
+        if matches:
+            answer = matches[-1].group(1).strip()
+            # keep only the first line of whatever followed the marker
+            answer = answer.splitlines()[0].strip() if answer else ""
+        else:
+            # fallback: last non-empty line of the model output
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            answer = lines[-1] if lines else ""
+        return _normalize_answer(answer)
+
+    def _retrieved_doc_ids(self, chunks):
+        """Distinct parent-document ids of the chunks, in rerank order, top 3.
+
+        The scorer compares this against the gold source_docs: an overlap is
+        worth at least partial credit, so the order/identity of these ids
+        matters as much as the generated answer.
+        """
+        out = []
+        for c in chunks:
+            did = self.doc_ids[c.doc_index]
+            if did not in out:
+                out.append(did)
+        return out[:3]
+
     def _build_messages(self, question, chunks):
         """Assemble the chat prompt (system + few-shot + sources) for a question."""
         context = self._build_context(chunks)
@@ -184,57 +202,53 @@ class NLPManager:
         )
 
     @staticmethod
-    def _parse_answer(text):
-        """Extract and normalize the answer after the last 'FINAL ANSWER:' marker."""
-        matches = list(_FINAL_ANSWER_RE.finditer(text))
-        if matches:
-            answer = matches[-1].group(1).strip()
-            answer = answer.splitlines()[0].strip() if answer else ""
-        else:
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            answer = lines[-1] if lines else ""
-        return _normalize_answer(answer)
-
-    def _retrieved_doc_ids(self, chunks):
-        """Distinct parent-document ids of the chunks, in rerank order, top 3."""
-        out = []
-        for c in chunks:
-            did = self.doc_ids[c.doc_index]
-            if did not in out:
-                out.append(did)
-        return out[:3]
+    def _extract_generated(output):
+        """Pull the assistant text out of one pipeline output element."""
+        generated = output[0].get("generated_text", "") if output else ""
+        if isinstance(generated, list):
+            last = generated[-1] if generated else {}
+            generated = (last.get("content", "")
+                         if isinstance(last, dict) else str(last))
+        return str(generated)
 
     def qa_batch(self, questions):
-        """Answer a batch of questions in one vLLM continuous-batched pass.
+        """Answer a batch of questions with one batched generation pass.
 
         Returns a list of {"answer", "documents"} dicts aligned with questions.
+        Batched generation amortizes per-call overhead and is the main speed
+        lever over answering one question at a time.
         """
         if not self.loaded:
             return [{"answer": "", "documents": []} for _ in questions]
 
-        # Retrieve for the whole batch at once (batched embed + rerank).
-        try:
-            retrieved = self.retriever.retrieve_batch(questions)
-        except Exception as e:
-            print(f">>> qa_batch retrieval error: {e}", flush=True)
-            retrieved = [[] for _ in questions]
+        # Retrieval is cheap relative to generation; run it per question.
+        retrieved = []
+        for q in questions:
+            try:
+                retrieved.append(self.retriever.retrieve(q))
+            except Exception as e:
+                print(f">>> qa_batch retrieval error: {e}", flush=True)
+                retrieved.append([])
 
         results = [{"answer": "", "documents": self._retrieved_doc_ids(c)}
                    for c in retrieved]
 
-        # Generate only for questions that retrieved context.
-        gen_idx, convs = [], []
+        # Build prompts only for questions that retrieved context.
+        gen_idx, prompts = [], []
         for i, (q, chunks) in enumerate(zip(questions, retrieved)):
             if chunks:
                 gen_idx.append(i)
-                convs.append(self._build_messages(q, chunks))
+                prompts.append(self._build_messages(q, chunks))
 
-        if convs:
+        if prompts:
             try:
-                outputs = self.llm.chat(convs, self.sampling, use_tqdm=False)
-                for i, out in zip(gen_idx, outputs):
-                    text = out.outputs[0].text if out.outputs else ""
-                    results[i]["answer"] = self._parse_answer(text)
+                outputs = self.pipe(
+                    prompts, max_new_tokens=MAX_NEW_TOKENS,
+                    return_full_text=False, do_sample=False,
+                    batch_size=min(len(prompts), GEN_BATCH_SIZE))
+                for i, output in zip(gen_idx, outputs):
+                    results[i]["answer"] = self._parse_answer(
+                        self._extract_generated(output))
             except Exception as e:  # keep retrieved docs for partial credit
                 print(f">>> qa_batch generation error: {e}", flush=True)
         return results

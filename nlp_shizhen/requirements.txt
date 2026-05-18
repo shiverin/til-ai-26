@@ -2,9 +2,7 @@
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-# vllm pins its own torch build; it powers fast batched generation.
-vllm==0.21.0
-ninja
+torch
 transformers
 sentence-transformers
 accelerate
