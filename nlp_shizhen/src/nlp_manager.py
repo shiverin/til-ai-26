@@ -26,6 +26,25 @@ EMPTY_ANSWER_RERANK_THRESHOLD = 0.0
 
 _FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER:\s*(.*)", re.IGNORECASE | re.DOTALL)
 
+# Phi-4-mini sometimes emits stray spaces around digits/punctuation
+# ("120, 000", "71 %", "3. 1", "korren - 8"). These repair the obvious cases.
+# Comma/period spaces are collapsed only when digits flank BOTH sides, so an
+# abbreviation space ("vs. 1.4%") is left intact.
+_NUM_PUNCT = re.compile(r"(\d)\s*([,.])\s*(\d)")
+_SP_PCT = re.compile(r"(\d)\s+%")
+_SP_HYPHEN = re.compile(r"(\w)\s+-\s+(\w)")
+_SOURCE_PREFIX = re.compile(r"^\s*Source\s+doc_?\d+\s*[:>]\s*", re.IGNORECASE)
+
+
+def _normalize_answer(answer: str) -> str:
+    """Repair stray spacing artifacts and strip echoed 'Source doc' labels."""
+    answer = _SOURCE_PREFIX.sub("", answer)
+    answer = _NUM_PUNCT.sub(r"\1\2\3", answer)
+    answer = _NUM_PUNCT.sub(r"\1\2\3", answer)  # 2nd pass: chained groups
+    answer = _SP_PCT.sub(r"\1%", answer)
+    answer = _SP_HYPHEN.sub(r"\1-\2", answer)
+    return answer.strip()
+
 SYSTEM_PROMPT = (
     "You answer questions about the fictional world of Clairos using ONLY the "
     "provided SOURCES.\n"
@@ -142,15 +161,17 @@ class NLPManager:
 
     @staticmethod
     def _parse_answer(text):
-        """Extract the answer after the last 'FINAL ANSWER:' marker."""
+        """Extract and normalize the answer after the last 'FINAL ANSWER:' marker."""
         matches = list(_FINAL_ANSWER_RE.finditer(text))
         if matches:
             answer = matches[-1].group(1).strip()
             # keep only the first line of whatever followed the marker
-            return answer.splitlines()[0].strip() if answer else ""
-        # fallback: last non-empty line of the model output
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        return lines[-1] if lines else ""
+            answer = answer.splitlines()[0].strip() if answer else ""
+        else:
+            # fallback: last non-empty line of the model output
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            answer = lines[-1] if lines else ""
+        return _normalize_answer(answer)
 
     def _retrieved_doc_ids(self, chunks):
         """Distinct parent-document ids of the chunks, in rerank order, top 3.
