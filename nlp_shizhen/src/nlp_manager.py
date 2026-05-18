@@ -101,15 +101,29 @@ class NLPManager:
             self.reranker.model.half()
 
         self.retriever = Retriever(self.embedder, self.reranker)
+        self.doc_ids = []  # corpus-position -> document id, set by load_corpus
         print(">>> NLPManager: ready", flush=True)
 
     def load_corpus(self, documents):
-        """Chunk the corpus and build the retrieval index."""
-        chunks = chunk_corpus(documents, self.embedder.tokenizer)
+        """Chunk the corpus and build the retrieval index.
+
+        documents: list of {"id": str, "document": str} dicts (current task
+        contract). Plain strings are also accepted for backward compatibility.
+        """
+        texts = []
+        self.doc_ids = []
+        for i, d in enumerate(documents):
+            if isinstance(d, dict):
+                texts.append(d.get("document", "") or "")
+                self.doc_ids.append(d.get("id", f"doc_{i}"))
+            else:
+                texts.append(d)
+                self.doc_ids.append(f"doc_{i}")
+        chunks = chunk_corpus(texts, self.embedder.tokenizer)
         self.retriever.index(chunks)
         self.loaded = True
         print(f">>> NLPManager: indexed {len(chunks)} chunks "
-              f"from {len(documents)} documents", flush=True)
+              f"from {len(texts)} documents", flush=True)
 
     def _build_context(self, chunks):
         """Join reranked chunks into a context string within the token budget."""
@@ -138,19 +152,44 @@ class NLPManager:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         return lines[-1] if lines else ""
 
+    def _retrieved_doc_ids(self, chunks):
+        """Distinct parent-document ids of the chunks, in rerank order, top 3.
+
+        The scorer compares this against the gold source_docs: an overlap is
+        worth at least partial credit, so the order/identity of these ids
+        matters as much as the generated answer.
+        """
+        out = []
+        for c in chunks:
+            did = self.doc_ids[c.doc_index]
+            if did not in out:
+                out.append(did)
+        return out[:3]
+
     def qa(self, question):
-        """Answer one question. Returns "" on retrieval miss or any failure."""
+        """Answer one question.
+
+        Returns {"answer": str, "documents": [doc_id, ...]} — the answer plus
+        the retrieved document ids, as required by the scoring contract.
+        """
         if not self.loaded:
-            return ""
+            return {"answer": "", "documents": []}
+
         try:
             chunks = self.retriever.retrieve(question)
-            if not chunks:
-                return ""
-            if (self.retriever.last_top_score is not None
-                    and self.retriever.last_top_score
-                    < EMPTY_ANSWER_RERANK_THRESHOLD):
-                return ""
+        except Exception as e:
+            print(f">>> NLPManager.qa retrieval error: {e}", flush=True)
+            return {"answer": "", "documents": []}
 
+        pred_docs = self._retrieved_doc_ids(chunks)
+        if not chunks:
+            return {"answer": "", "documents": pred_docs}
+        if (self.retriever.last_top_score is not None
+                and self.retriever.last_top_score
+                < EMPTY_ANSWER_RERANK_THRESHOLD):
+            return {"answer": "", "documents": pred_docs}
+
+        try:
             context = self._build_context(chunks)
             messages = (
                 [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -169,7 +208,8 @@ class NLPManager:
                 last = generated[-1] if generated else {}
                 generated = (last.get("content", "")
                              if isinstance(last, dict) else str(last))
-            return self._parse_answer(str(generated))
-        except Exception as e:  # one bad question must not abort the batch
-            print(f">>> NLPManager.qa error: {e}", flush=True)
-            return ""
+            answer = self._parse_answer(str(generated))
+        except Exception as e:  # generation failed; keep docs for partial credit
+            print(f">>> NLPManager.qa generation error: {e}", flush=True)
+            answer = ""
+        return {"answer": answer, "documents": pred_docs}

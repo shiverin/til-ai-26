@@ -1,11 +1,18 @@
 """In-process evaluation harness for the NLP RAG QA pipeline.
 
 Loads the pipeline and the ModernBERT answer-equivalence scorer, runs the
-local question set, and reports equiv_rate (overall + L1/L2) and retrieval
-recall@k against the known source documents.
+local question set, and reports the competition score under the CURRENT
+scoring contract (test/test_nlp.py):
+
+  - no overlap between predicted docs and gold source_docs -> 0.0
+  - overlap but answer not equivalent (prob < 0.9)          -> 0.4
+  - overlap and answer equivalent                           -> 1.0
+
+The reported score is the mean over all questions. Also reports the L1/L2
+split, the score-bucket breakdown, and retrieval recall@1/3.
 
 Usage:
-  python eval_local.py            # full 883-question set
+  python eval_local.py            # full question set
   python eval_local.py --limit 150  # quick subset for tuning iterations
 """
 import argparse
@@ -33,10 +40,10 @@ def main():
     # Use the host model cache; the container uses /app/models.
     nlp_manager.MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 
-    # Load documents in sorted DOC-id order so corpus index <-> DOC-id is known.
+    # Load documents as {"id","document"} dicts, matching the task contract.
     doc_paths = sorted(glob.glob(f"{DATA_DIR}/documents/*.txt"))
-    doc_ids = [os.path.basename(p)[:-4] for p in doc_paths]
-    documents = [open(p).read() for p in doc_paths]
+    documents = [{"id": os.path.basename(p)[:-4], "document": open(p).read()}
+                 for p in doc_paths]
 
     rows = [json.loads(ln) for ln in open(f"{DATA_DIR}/nlp.jsonl") if ln.strip()]
     if args.limit:
@@ -48,51 +55,64 @@ def main():
     manager.load_corpus(documents)
 
     from test_nlp import AnswerEquivalenceEvaluator
-    scorer = AnswerEquivalenceEvaluator(model_path=EVAL_MODEL, max_length=512)
+    scorer = AnswerEquivalenceEvaluator(
+        model_path=EVAL_MODEL, threshold=0.9, max_length=512)
 
-    preds, triples = [], []
-    recall_hits = {1: 0, 3: 0, 5: 0}
+    preds = []
+    recall_hits = {1: 0, 3: 0}
     for i, r in enumerate(rows):
-        q = r["question"]
-        # retrieval recall: which docs do the reranked chunks come from
-        chunks = manager.retriever.retrieve(q)
-        retrieved_docs = []
-        for c in chunks:
-            d = doc_ids[c.doc_index]
-            if d not in retrieved_docs:
-                retrieved_docs.append(d)
-        src = r["source_docs"][0]
-        for k in recall_hits:
-            if src in retrieved_docs[:k]:
-                recall_hits[k] += 1
-        pred = manager.qa(q)
+        pred = manager.qa(r["question"])  # {"answer","documents"}
         preds.append(pred)
-        triples.append((q, r["answer"] or "", pred))
+        pdocs = pred["documents"]
+        src = r["source_docs"][0]
+        if pdocs[:1] == [src] or (pdocs and src == pdocs[0]):
+            recall_hits[1] += 1
+        if src in pdocs[:3]:
+            recall_hits[3] += 1
         if (i + 1) % 25 == 0:
             print(f"  {i + 1}/{len(rows)} answered", flush=True)
 
-    results = scorer.batch_evaluate(triples)
-    by_diff = {"L1": [0, 0], "L2": [0, 0]}
-    for r, res in zip(rows, results):
-        d = r["difficulty"]
-        by_diff.setdefault(d, [0, 0])
-        by_diff[d][1] += 1
-        by_diff[d][0] += int(res.equivalent)
+    # 5-tuple scoring: (gold_docs, pred_docs[:3], question, gold, candidate)
+    data = [(r["source_docs"], p["documents"][:3], r["question"],
+             r["answer"] or "", p["answer"])
+            for r, p in zip(rows, preds)]
+    results = scorer.batch_evaluate(data)
+    summary = scorer.aggregate_score(results)
+
     n = len(rows)
-    equiv = sum(res.equivalent for res in results)
+    buckets = {1.0: 0, 0.4: 0, 0.0: 0}
+    by_diff = {}
+    for r, res in zip(rows, results):
+        buckets[res.score] = buckets.get(res.score, 0) + 1
+        d = r["difficulty"]
+        agg = by_diff.setdefault(d, [0.0, 0])
+        agg[0] += res.score
+        agg[1] += 1
 
     print("\n==== RESULTS ====")
-    print(f"equiv_rate (score): {equiv / n:.4f}  ({equiv}/{n})")
-    for d, (hit, tot) in sorted(by_diff.items()):
-        if tot:
-            print(f"  {d}: {hit / tot:.4f}  ({hit}/{tot})")
-    for k, hit in sorted(recall_hits.items()):
-        print(f"retrieval recall@{k}: {hit / n:.4f}")
+    print(f"SCORE (mean): {summary['equiv_rate']:.4f}   (n={n})")
+    for d, (tot, cnt) in sorted(by_diff.items()):
+        if cnt:
+            print(f"  {d}: {tot / cnt:.4f}  ({cnt} q)")
+    print(f"buckets: correct(1.0)={buckets.get(1.0, 0)}  "
+          f"retrieval-only(0.4)={buckets.get(0.4, 0)}  "
+          f"miss(0.0)={buckets.get(0.0, 0)}")
+    print(f"retrieval recall@1: {recall_hits[1] / n:.4f}")
+    print(f"retrieval recall@3: {recall_hits[3] / n:.4f}")
 
+    detail = [
+        {"question": r["question"], "difficulty": r["difficulty"],
+         "gold": r["answer"], "source_docs": r["source_docs"],
+         "pred_answer": p["answer"], "pred_docs": p["documents"],
+         "score": res.score, "equivalent": res.equivalent,
+         "prob_equivalent": res.prob_equivalent}
+        for r, p, res in zip(rows, preds, results)
+    ]
     out = os.path.join(os.path.dirname(__file__), "eval_results.json")
     with open(out, "w") as f:
-        json.dump({"equiv_rate": equiv / n, "preds": preds}, f, indent=2)
-    print(f"\nSaved predictions to {out}")
+        json.dump({"score": summary["equiv_rate"], "n": n, "detail": detail}, f,
+                  indent=2)
+    print(f"\nSaved detailed results to {out}")
 
 
 if __name__ == "__main__":

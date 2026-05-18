@@ -1,14 +1,18 @@
 """FastAPI server for the NLP RAG QA container.
 
-Contract (unchanged from the task spec):
-  POST /nlp    first call carries {"documents": [...]} -> corpus load
-               later calls carry {"question": ...}     -> answers
-  GET  /health -> 200 {"message": "health ok"} once ready; 503 while loading
+Contract (current task spec, see test/test_nlp.py):
+  POST /nlp
+    - corpus load: {"instances": [{"documents": [{"id","document"}, ...]}]}
+        -> {"predictions": [{"status": "loading"|"loaded"|"error"}]}
+    - readiness poll: {"instances": [{"poll": "true"}]}
+        -> {"predictions": [{"status": ...}]}
+    - questions: {"instances": [{"question": ...}, ...]}
+        -> {"predictions": [{"answer": str, "documents": [doc_id, ...]}, ...]}
+  GET /health -> 200 {"message": "health ok"} once ready; 503 while loading
 
-The model loads in a background thread. /health is a real readiness check: it
-responds immediately, but reports 503 while the model is still loading and 503
-(with the error) if the load failed -- it returns "health ok" only once the
-model is genuinely ready to serve.
+The model loads in a background thread so /health responds immediately. /health
+is a real readiness check: 503 while loading, 503 (with error) if the load
+failed, 200 only once the model is ready.
 """
 import asyncio
 import logging
@@ -73,22 +77,39 @@ async def _load_task(documents) -> None:
         load_state.status = "failed"
 
 
+def _status_payload() -> dict:
+    """Wrap the load state in the {"status": ...} schema the scorer polls."""
+    s = load_state.status
+    if s == "idle":
+        s = "loading"
+    elif s == "failed":
+        s = "error"
+    return {"predictions": [{"status": s}]}
+
+
 @app.post("/nlp")
 async def nlp(request: Request) -> dict:
     inputs_json = await request.json()
     first = inputs_json["instances"][0]
 
+    # Corpus-load request: documents arrive as {"id","document"} dicts.
     if first.get("documents") is not None:
         async with load_state.lock:
             if load_state.status == "idle":
                 load_state.status = "loading"
                 load_state.task = asyncio.create_task(
                     _load_task(first["documents"]))
-            return {"predictions": [load_state.status]}
+        return _status_payload()
 
+    # Readiness poll.
     if first.get("poll") is not None:
-        return {"predictions": [load_state.status]}
+        return _status_payload()
 
+    # QA batch: each prediction is {"answer": ..., "documents": [doc_id, ...]}.
+    if manager is None:
+        return {"predictions": [
+            {"answer": "", "documents": []} for _ in inputs_json["instances"]
+        ]}
     predictions = [
         await asyncio.to_thread(manager.qa, instance["question"])
         for instance in inputs_json["instances"]
@@ -98,13 +119,7 @@ async def nlp(request: Request) -> dict:
 
 @app.get("/health")
 def health():
-    """Readiness check: 'healthy' only once the model is loaded and ready.
-
-    Returning "health ok" unconditionally would mask a failed model load -- the
-    container would look healthy and fail mysteriously later at corpus-load
-    time. 503-while-loading is also the standard readiness-probe behaviour that
-    `til test` (5-minute poll) and Vertex AI expect.
-    """
+    """Readiness check: 'healthy' only once the model is loaded and ready."""
     if model_error is not None:
         return JSONResponse(
             status_code=503,
