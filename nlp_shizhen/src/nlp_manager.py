@@ -27,21 +27,32 @@ EMPTY_ANSWER_RERANK_THRESHOLD = 0.0
 _FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER:\s*(.*)", re.IGNORECASE | re.DOTALL)
 
 SYSTEM_PROMPT = (
-    "You are a precise question-answering assistant for documents about the "
-    "world of Clairos. Answer the QUESTION using ONLY the information in the "
-    "SOURCES.\n"
-    "- Give a direct, concise answer: a short phrase or sentence, usually "
-    "under 25 words.\n"
-    "- If the question needs arithmetic or multi-step reasoning, work it out "
-    "briefly, then state the result.\n"
-    "- Do not add citations or phrases like 'According to the sources'.\n"
-    "- Always end your reply with a line in exactly this format:\n"
-    "FINAL ANSWER: <your concise answer>"
+    "You answer questions about the fictional world of Clairos using ONLY the "
+    "provided SOURCES.\n"
+    "Rules:\n"
+    "1. Answer with the shortest phrase that fully answers the question — "
+    "usually 1 to 8 words. Never write a full sentence and never restate the "
+    "question.\n"
+    "2. Copy names, acronyms, codenames, dates, codes, numbers and their "
+    "capitalization EXACTLY as written in the SOURCES. Do not lowercase, "
+    "rewrite, expand, round, or convert them (e.g. keep '78 PCE' as '78 PCE', "
+    "keep 'SEASTITCH' uppercase).\n"
+    "3. If the question needs arithmetic or multi-step reasoning, work through "
+    "it step by step first, then give the final result.\n"
+    "4. Do not add explanations or phrases like 'According to the sources'.\n"
+    "5. End your reply with a line in exactly this format:\n"
+    "FINAL ANSWER: <shortest answer>"
 )
 
-# Two few-shot turns: one L1 lookup, one L2 calculation. They teach the answer
-# format and that L2 questions should be computed, not described.
+# Few-shot turns teach the answer format: ultra-terse, exact casing preserved,
+# and that reasoning questions are computed step by step before the result.
 FEWSHOT = [
+    {"role": "user", "content": (
+        "SOURCES:\nSource doc_0: ONE Network Enterprises referred to the "
+        "classified data-sharing arrangement internally by the codename "
+        "SEASTITCH.\n\nQUESTION: What internal codename did ONE Network "
+        "Enterprises use for the arrangement?")},
+    {"role": "assistant", "content": "FINAL ANSWER: SEASTITCH"},
     {"role": "user", "content": (
         "SOURCES:\nSource doc_0: The Division assessed a penalty of 4.5 "
         "million Credits and mandatory equipment surrender against the "
