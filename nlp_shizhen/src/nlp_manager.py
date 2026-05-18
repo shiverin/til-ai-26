@@ -212,14 +212,12 @@ class NLPManager:
         if not self.loaded:
             return [{"answer": "", "documents": []} for _ in questions]
 
-        # Retrieval is cheap relative to generation; run it per question.
-        retrieved = []
-        for q in questions:
-            try:
-                retrieved.append(self.retriever.retrieve(q))
-            except Exception as e:
-                print(f">>> qa_batch retrieval error: {e}", flush=True)
-                retrieved.append([])
+        # Retrieve for the whole batch at once (batched embed + rerank).
+        try:
+            retrieved = self.retriever.retrieve_batch(questions)
+        except Exception as e:
+            print(f">>> qa_batch retrieval error: {e}", flush=True)
+            retrieved = [[] for _ in questions]
 
         results = [{"answer": "", "documents": self._retrieved_doc_ids(c)}
                    for c in retrieved]
