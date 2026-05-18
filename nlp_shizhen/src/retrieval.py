@@ -49,8 +49,8 @@ class Retriever:
         top = r.retrieve(question) # per question -> list[Chunk], best first
     """
 
-    def __init__(self, embedder, reranker, dense_top=50, sparse_top=50,
-                 fuse_top=40, final_k=6):
+    def __init__(self, embedder, reranker, dense_top=32, sparse_top=32,
+                 fuse_top=24, final_k=6):
         self.embedder = embedder
         self.reranker = reranker
         self.dense_top = dense_top

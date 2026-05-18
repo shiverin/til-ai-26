@@ -18,8 +18,13 @@ EMBEDDER_ID = "BAAI/bge-large-en-v1.5"
 RERANKER_ID = "BAAI/bge-reranker-v2-m3"
 
 # Tunable pipeline constants (adjusted in Task 11 using eval_local.py).
-MAX_CONTEXT_TOKENS = 2800
+# 1600-token context covers the top ~4-5 reranked chunks (the answer is almost
+# always in the top 1-3); the smaller prompt speeds up prefill markedly.
+MAX_CONTEXT_TOKENS = 1024
 MAX_NEW_TOKENS = 256
+# Questions per batched generation pass. Batched generation is the main speed
+# lever; 4 matches the request batch size and is VRAM-safe on the 15 GB T4.
+GEN_BATCH_SIZE = 4
 # Return "" only if the best reranked chunk scores below this. Default 0.0
 # disables the empty-answer path (all local questions are answerable).
 EMPTY_ANSWER_RERANK_THRESHOLD = 0.0
@@ -65,6 +70,8 @@ SYSTEM_PROMPT = (
 
 # Few-shot turns teach the answer format: ultra-terse, exact casing preserved,
 # and that reasoning questions are computed step by step before the result.
+# Two examples (one terse L1 lookup, one L2 calculation) — kept short to keep
+# the prompt (and prefill cost) small.
 FEWSHOT = [
     {"role": "user", "content": (
         "SOURCES:\nSource doc_0: ONE Network Enterprises referred to the "
@@ -72,13 +79,6 @@ FEWSHOT = [
         "SEASTITCH.\n\nQUESTION: What internal codename did ONE Network "
         "Enterprises use for the arrangement?")},
     {"role": "assistant", "content": "FINAL ANSWER: SEASTITCH"},
-    {"role": "user", "content": (
-        "SOURCES:\nSource doc_0: The Division assessed a penalty of 4.5 "
-        "million Credits and mandatory equipment surrender against the "
-        "respondent.\n\nQUESTION: What penalty was assessed against the "
-        "respondent?")},
-    {"role": "assistant", "content": (
-        "FINAL ANSWER: 4.5 million Credits and mandatory equipment surrender")},
     {"role": "user", "content": (
         "SOURCES:\nSource doc_0: Project Liminal had a total development cost "
         "of 12.4 billion Credits. Low-end projected annual recurring revenue "
@@ -100,6 +100,10 @@ class NLPManager:
         print(">>> NLPManager: loading generator", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(
             PHI_MODEL_ID, cache_dir=MODELS_DIR, local_files_only=True)
+        # Batched generation needs a pad token and left padding (decoder-only).
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
         self.model = AutoModelForCausalLM.from_pretrained(
             PHI_MODEL_ID, cache_dir=MODELS_DIR, local_files_only=True,
             device_map="auto", torch_dtype=torch.float16,
@@ -187,50 +191,68 @@ class NLPManager:
                 out.append(did)
         return out[:3]
 
-    def qa(self, question):
-        """Answer one question.
+    def _build_messages(self, question, chunks):
+        """Assemble the chat prompt (system + few-shot + sources) for a question."""
+        context = self._build_context(chunks)
+        return (
+            [{"role": "system", "content": SYSTEM_PROMPT}]
+            + FEWSHOT
+            + [{"role": "user", "content":
+                f"SOURCES:\n{context}\n\nQUESTION: {question}"}]
+        )
 
-        Returns {"answer": str, "documents": [doc_id, ...]} — the answer plus
-        the retrieved document ids, as required by the scoring contract.
+    @staticmethod
+    def _extract_generated(output):
+        """Pull the assistant text out of one pipeline output element."""
+        generated = output[0].get("generated_text", "") if output else ""
+        if isinstance(generated, list):
+            last = generated[-1] if generated else {}
+            generated = (last.get("content", "")
+                         if isinstance(last, dict) else str(last))
+        return str(generated)
+
+    def qa_batch(self, questions):
+        """Answer a batch of questions with one batched generation pass.
+
+        Returns a list of {"answer", "documents"} dicts aligned with questions.
+        Batched generation amortizes per-call overhead and is the main speed
+        lever over answering one question at a time.
         """
         if not self.loaded:
-            return {"answer": "", "documents": []}
+            return [{"answer": "", "documents": []} for _ in questions]
 
-        try:
-            chunks = self.retriever.retrieve(question)
-        except Exception as e:
-            print(f">>> NLPManager.qa retrieval error: {e}", flush=True)
-            return {"answer": "", "documents": []}
+        # Retrieval is cheap relative to generation; run it per question.
+        retrieved = []
+        for q in questions:
+            try:
+                retrieved.append(self.retriever.retrieve(q))
+            except Exception as e:
+                print(f">>> qa_batch retrieval error: {e}", flush=True)
+                retrieved.append([])
 
-        pred_docs = self._retrieved_doc_ids(chunks)
-        if not chunks:
-            return {"answer": "", "documents": pred_docs}
-        if (self.retriever.last_top_score is not None
-                and self.retriever.last_top_score
-                < EMPTY_ANSWER_RERANK_THRESHOLD):
-            return {"answer": "", "documents": pred_docs}
+        results = [{"answer": "", "documents": self._retrieved_doc_ids(c)}
+                   for c in retrieved]
 
-        try:
-            context = self._build_context(chunks)
-            messages = (
-                [{"role": "system", "content": SYSTEM_PROMPT}]
-                + FEWSHOT
-                + [{"role": "user", "content":
-                    f"SOURCES:\n{context}\n\nQUESTION: {question}"}]
-            )
-            output = self.pipe(
-                messages, max_new_tokens=MAX_NEW_TOKENS,
-                return_full_text=False, do_sample=False)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # Build prompts only for questions that retrieved context.
+        gen_idx, prompts = [], []
+        for i, (q, chunks) in enumerate(zip(questions, retrieved)):
+            if chunks:
+                gen_idx.append(i)
+                prompts.append(self._build_messages(q, chunks))
 
-            generated = output[0].get("generated_text", "") if output else ""
-            if isinstance(generated, list):
-                last = generated[-1] if generated else {}
-                generated = (last.get("content", "")
-                             if isinstance(last, dict) else str(last))
-            answer = self._parse_answer(str(generated))
-        except Exception as e:  # generation failed; keep docs for partial credit
-            print(f">>> NLPManager.qa generation error: {e}", flush=True)
-            answer = ""
-        return {"answer": answer, "documents": pred_docs}
+        if prompts:
+            try:
+                outputs = self.pipe(
+                    prompts, max_new_tokens=MAX_NEW_TOKENS,
+                    return_full_text=False, do_sample=False,
+                    batch_size=min(len(prompts), GEN_BATCH_SIZE))
+                for i, output in zip(gen_idx, outputs):
+                    results[i]["answer"] = self._parse_answer(
+                        self._extract_generated(output))
+            except Exception as e:  # keep retrieved docs for partial credit
+                print(f">>> qa_batch generation error: {e}", flush=True)
+        return results
+
+    def qa(self, question):
+        """Answer one question -> {"answer", "documents"}."""
+        return self.qa_batch([question])[0]

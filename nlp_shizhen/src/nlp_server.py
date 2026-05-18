@@ -110,10 +110,8 @@ async def nlp(request: Request) -> dict:
         return {"predictions": [
             {"answer": "", "documents": []} for _ in inputs_json["instances"]
         ]}
-    predictions = [
-        await asyncio.to_thread(manager.qa, instance["question"])
-        for instance in inputs_json["instances"]
-    ]
+    questions = [inst["question"] for inst in inputs_json["instances"]]
+    predictions = await asyncio.to_thread(manager.qa_batch, questions)
     return {"predictions": predictions}
 
 

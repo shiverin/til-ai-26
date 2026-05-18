@@ -58,19 +58,25 @@ def main():
     scorer = AnswerEquivalenceEvaluator(
         model_path=EVAL_MODEL, threshold=0.9, max_length=512)
 
+    import time
     preds = []
     recall_hits = {1: 0, 3: 0}
-    for i, r in enumerate(rows):
-        pred = manager.qa(r["question"])  # {"answer","documents"}
-        preds.append(pred)
+    batch = 4  # mirrors the request batch size used by test_nlp.py
+    t0 = time.time()
+    for i in range(0, len(rows), batch):
+        chunk = rows[i:i + batch]
+        preds.extend(manager.qa_batch([r["question"] for r in chunk]))
+        if (i // batch) % 6 == 0:
+            print(f"  {min(i + batch, len(rows))}/{len(rows)} answered",
+                  flush=True)
+    qa_secs = time.time() - t0
+    for r, pred in zip(rows, preds):
         pdocs = pred["documents"]
         src = r["source_docs"][0]
-        if pdocs[:1] == [src] or (pdocs and src == pdocs[0]):
+        if pdocs and src == pdocs[0]:
             recall_hits[1] += 1
         if src in pdocs[:3]:
             recall_hits[3] += 1
-        if (i + 1) % 25 == 0:
-            print(f"  {i + 1}/{len(rows)} answered", flush=True)
 
     # 5-tuple scoring: (gold_docs, pred_docs[:3], question, gold, candidate)
     data = [(r["source_docs"], p["documents"][:3], r["question"],
@@ -91,6 +97,7 @@ def main():
 
     print("\n==== RESULTS ====")
     print(f"SCORE (mean): {summary['equiv_rate']:.4f}   (n={n})")
+    print(f"QA time: {qa_secs:.1f}s total, {qa_secs / n:.2f}s/question")
     for d, (tot, cnt) in sorted(by_diff.items()):
         if cnt:
             print(f"  {d}: {tot / cnt:.4f}  ({cnt} q)")
