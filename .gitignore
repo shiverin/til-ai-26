@@ -177,6 +177,7 @@ logs/
 *.pt
 *.jpg
 *.txt
+*.wav
 ae/training/viz/
 ae/training/tests/
 docs/
