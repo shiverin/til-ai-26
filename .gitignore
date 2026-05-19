@@ -173,3 +173,14 @@ cython_debug/
 src/gcloud/*.json
 
 data
+logs/
+*.pt
+*.jpg
+*.txt
+ae/training/viz/
+ae/training/tests/
+docs/
+
+# ASR fine-tune artifacts (large)
+asr/finetune/output/
+asr/models/*.nemo
