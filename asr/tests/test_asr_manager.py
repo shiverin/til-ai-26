@@ -1,9 +1,7 @@
 """Unit tests for ASRManager helpers that don't require a loaded model."""
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 from omegaconf import OmegaConf
 
 from asr.src.asr_manager import ASRManager
@@ -41,10 +39,12 @@ def test_enable_cuda_graph_decoder_swallows_and_logs_failure(caplog):
         "unknown key use_cuda_graph_decoder"
     )
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING", logger="asr.src.asr_manager"):
         applied = manager._try_enable_cuda_graph_decoder()
 
     assert applied is False
     assert any(
-        "cuda-graph decoder" in rec.message.lower() for rec in caplog.records
+        rec.name == "asr.src.asr_manager"
+        and "cuda-graph decoder" in rec.message.lower()
+        for rec in caplog.records
     )

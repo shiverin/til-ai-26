@@ -53,6 +53,8 @@ class ASRManager:
                 decoding_cfg.greedy.use_cuda_graph_decoder = True
             self.model.change_decoding_strategy(decoding_cfg)
             return True
+        # Broad catch on purpose: NeMo's exception taxonomy varies across
+        # versions; any failure here should fall back, not crash startup.
         except Exception as exc:
             _LOG.warning(
                 "CUDA-graph decoder not enabled, falling back to default "
