@@ -17,6 +17,15 @@ RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# The base image ships torchao 0.14, but peft (pulled in by NeMo) requires
+# torchao > 0.16 and raises ImportError on the old one. Removing it is
+# harmless here and avoids that conflict.
+RUN pip uninstall -y torchao
+
+# Bakes the fine-tuned model into the image so the container runs offline.
+COPY models/parakeet_finetuned.nemo /workspace/models/parakeet_finetuned.nemo
+ENV HF_HUB_OFFLINE=1
+
 # Copies your source files.
 COPY src .
 

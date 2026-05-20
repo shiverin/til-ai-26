@@ -2,3 +2,6 @@
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
+
+# Canary-Qwen-2.5B is loaded via NVIDIA NeMo.
+nemo_toolkit[asr]
