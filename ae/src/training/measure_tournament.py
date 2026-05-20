@@ -1,8 +1,8 @@
-"""Read-only scripted 6-way tournament: measure which AE strategy wins.
+"""Read-only scripted 8-way tournament: measure which AE strategy wins.
 
-Each episode places the six scripted strategies in the six fixed novice slots
-by a seeded random permutation, runs the episode, and records per-slot
-cumulative reward. Per-episode outcomes append to logs/tournament.jsonl
+Each episode places a seeded random sample of six of the eight scripted
+strategies in the six fixed novice slots, runs the episode, and records
+per-slot cumulative reward. Per-episode outcomes append to logs/tournament.jsonl
 (crash-safe, resumable); at the end the script aggregates and writes
 logs/tournament_summary.json. See the design spec for the decision rule.
 """
@@ -16,10 +16,11 @@ import time
 
 import numpy as np
 
-# ae/src holds scripted/, imported transitively via evaluate -> features.
-# pytest's conftest.py adds it for tests; a standalone run needs this.
+# ae/src holds scripted/ and features.py; this file now lives at ae/src/training/,
+# so the parent directory is ae/src/. pytest's conftest.py also adds it for tests;
+# a standalone run needs this.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from evaluate import ScriptedAgent
 from til_environment import bomberman_env
@@ -27,17 +28,17 @@ from til_environment.config import default_config
 
 SLOTS = ["agent_0", "agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]
 
-# The six named scripted strategies. test_strategy_names_match_registry
+# The eight named scripted strategies. test_strategy_names_match_registry
 # asserts this stays in sync with scripted.strategies.STRATEGIES.
 STRATEGY_NAMES = ["balanced", "balanced_extreme", "base_rusher",
-                  "base_rusher_extreme", "collector", "camper"]
+                  "base_rusher_extreme", "collector", "camper", "forager",
+                  "lean_rush", "defender"]
 
 
 def assign_roster(episode_seed):
-    """Return {slot: strategy} — a seeded random permutation of the strategies
-    across the six slots, so each strategy is equally likely in each slot."""
-    perm = random.Random(episode_seed).sample(STRATEGY_NAMES,
-                                              len(STRATEGY_NAMES))
+    """Return {slot: strategy} — a seeded random sample of `len(SLOTS)`
+    strategies, one per slot, drawn without replacement from STRATEGY_NAMES."""
+    perm = random.Random(episode_seed).sample(STRATEGY_NAMES, len(SLOTS))
     return dict(zip(SLOTS, perm))
 
 
@@ -77,8 +78,9 @@ def aggregate(records):
         wins = sum(1 for r in records if r["winner_strategy"] == strat)
         rewards = []
         for r in records:
-            slot = next(s for s, v in r["roster"].items() if v == strat)
-            rewards.append(r["cumulative_rewards"][slot])
+            slot = next((s for s, v in r["roster"].items() if v == strat), None)
+            if slot is not None:
+                rewards.append(r["cumulative_rewards"][slot])
         per_strategy[strat] = {
             "win_count": wins,
             "win_rate": wins / n if n else 0.0,

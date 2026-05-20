@@ -53,7 +53,7 @@ requires-dist = [
     { name = "onnxruntime" },
     { name = "pillow" },
     { name = "tensorboard" },
-    { name = "til-environment", editable = "../../til-26-ae" },
+    { name = "til-environment", editable = "../../../til-26-ae" },
     { name = "torch" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "tyro" },
@@ -1856,7 +1856,7 @@ wheels = [
 [[package]]
 name = "til-environment"
 version = "1.4.0a1"
-source = { editable = "../../til-26-ae" }
+source = { editable = "../../../til-26-ae" }
 dependencies = [
     { name = "gymnasium" },
     { name = "imageio", extra = ["ffmpeg"] },

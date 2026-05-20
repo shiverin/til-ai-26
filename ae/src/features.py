@@ -144,8 +144,7 @@ class FeatureBuilder:
         self.belief.update(observation)
         self._tick_respawn(prev_collected, step)
 
-        gs = self.prior.grid_size
-        danger = DangerMap(self.belief.enemy_bombs, gs)
+        danger = DangerMap(self.belief.enemy_bombs, self.belief)
         planner = (build_planner(self.belief, danger)
                    if self.belief.location is not None else None)
         target = (_target_base(self.belief, planner, self.strategy.params)

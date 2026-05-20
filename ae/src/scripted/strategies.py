@@ -5,6 +5,7 @@ See docs/superpowers/specs/2026-05-16-ae-scripted-strategies-design.md.
 from dataclasses import dataclass
 
 from scripted.layers import camp, default, forage, hold, hunt, strike, survive, sweep
+from scripted.adaptive_layers import defend_intercept, forage_loop, rush_roi
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,12 @@ class StrategyParams:
     breach_min_bombs: int = 2          # min team_bombs for strike to breach a wall
     target_travel_weight: float = 0.05  # blended-score weight on arrival ticks
     soften_floor: float = 60.0          # effective-HP boundary: soften vs one-shot
+    loop_commit_ticks: int = 20        # min ticks on a forage loop before a switch
+    switch_factor: float = 0.6         # realised/estimate ratio below which to switch
+    forage_yield_window: int = 30      # trailing-window length for realised forage yield
+    roi_gate_margin: float = 0.15      # ROI hysteresis margin (target switch / forage gate)
+    vulture_hp_boost: float = 2.0      # ROI multiplier weight for a base's missing HP
+    defend_radius: int = 4             # Chebyshev radius around our base that triggers defend
 
 
 @dataclass(frozen=True)
@@ -51,4 +58,11 @@ STRATEGIES = {
     "camper": Strategy(
         "camper", (survive, camp, forage, sweep, hold),
         StrategyParams(camp_leash=4, forage_requires_endgame=False)),
+    "forager": Strategy(
+        "forager", (survive, forage_loop, sweep, default), _DEFAULT),
+    "lean_rush": Strategy(
+        "lean_rush", (survive, hunt, rush_roi, sweep, default), _DEFAULT),
+    "defender": Strategy(
+        "defender", (survive, defend_intercept, forage_loop, sweep, hold),
+        _DEFAULT),
 }

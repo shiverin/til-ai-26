@@ -16,11 +16,11 @@ RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copies your source files.
+# Copies your source files. `.dockerignore` excludes src/training/ (the
+# training pipeline) and other dev-only paths from the image — only the
+# runtime modules (scripted/, ae_*, policy.py, features.py, *.json, *.pt,
+# *.onnx) end up in /workspace.
 COPY src .
-# NeuralAEManager imports `features` (lives under ae/training/); ship it
-# alongside the served sources so the container can build features from obs.
-COPY training/features.py .
 
 # Which agent the server runs. Default "scripted" (proven rule cascade);
 # "neural" loads policy.onnx via NeuralAEManager.
@@ -36,7 +36,7 @@ ENV AE_MODE=${AE_MODE}
 # per build: docker build --build-arg AE_STRATEGY=<name> ...
 # Must be a key in ae/src/scripted/strategies.py STRATEGIES — one of:
 #   balanced, balanced_extreme, base_rusher, base_rusher_extreme,
-#   collector, camper.
+#   collector, camper, forager, lean_rush, defender.
 # Ignored when AE_MODE=neural.
 ARG AE_STRATEGY=balanced
 ENV AE_STRATEGY=${AE_STRATEGY}

@@ -43,7 +43,7 @@ def act(belief, action_mask, strategy=None):
     if belief.frozen_ticks > 0:
         return _record(belief, _first_legal(mask, [STAY]), "frozen")
 
-    danger = DangerMap(belief.enemy_bombs, belief.prior.grid_size)
+    danger = DangerMap(belief.enemy_bombs, belief)
     planner = build_planner(belief, danger)
 
     for layer in strategy.layers:

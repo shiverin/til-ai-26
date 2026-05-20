@@ -1,15 +1,25 @@
-"""Bomb danger map. Conservative Chebyshev-radius-2 model (no line-of-sight)."""
+"""Bomb danger map — line-of-sight blast model.
 
-BLAST_RADIUS = 2
+A bomb threatens a cell only within Chebyshev ``BLAST_RADIUS`` *and* with
+line-of-sight: the blast is stopped by any intact wall (destructible or
+indestructible) per the current wall belief. A destructible wall counts as
+present unless it is in ``belief.destroyed_walls``. This is the env-faithful
+blast geometry — the same `bomb_reaches` check the offense code uses.
+"""
+from scripted.blast import BLAST_RADIUS, bomb_reaches
 _SAFE = 999  # sentinel meaning "never in blast range"
 
 
 class DangerMap:
     """Per-cell soonest-detonation tick, bomb-overlap count, and the set of
-    ticks each cell is hit by a blast — all from believed bombs."""
+    ticks each cell is hit by a blast — all from believed bombs, line-of-sight
+    occluded."""
 
-    def __init__(self, bombs, grid_size):
-        """bombs: dict (x,y) -> timer ticks remaining."""
+    def __init__(self, bombs, belief):
+        """bombs: dict (x,y) -> timer ticks remaining. belief: the Belief —
+        supplies the grid size (`belief.prior.grid_size`) and the wall belief
+        used for the line-of-sight check."""
+        grid_size = belief.prior.grid_size
         self.grid_size = grid_size
         self._tick = {}     # (x,y) -> soonest detonation tick
         self._count = {}    # (x,y) -> number of bombs whose blast covers it
@@ -19,6 +29,9 @@ class DangerMap:
                             min(grid_size, bx + BLAST_RADIUS + 1)):
                 for y in range(max(0, by - BLAST_RADIUS),
                                 min(grid_size, by + BLAST_RADIUS + 1)):
+                    # Line-of-sight: the blast is blocked by any intact wall.
+                    if not bomb_reaches((bx, by), (x, y), belief):
+                        continue
                     prev = self._tick.get((x, y), _SAFE)
                     self._tick[(x, y)] = min(prev, timer)
                     self._count[(x, y)] = self._count.get((x, y), 0) + 1

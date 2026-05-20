@@ -354,15 +354,15 @@ import torch.optim as optim
 
 @dataclass
 class PPOConfig:
-    learning_rate: float = 2.5e-4    # KNOB
-    num_minibatches: int = 16        # KNOB — bumped from 4: 4 minibatches OOM'd
+    learning_rate: float = 1e-5      # KNOB
+    num_minibatches: int = 8         # KNOB — bumped from 4: 4 minibatches OOM'd
                                      # on a T4 (the 347-token transformer's
                                      # attention is [mb, h, T, T] per layer
                                      # per actor+critic; 4 -> mb=600 blew
                                      # 14GB, 16 -> mb=150 fits comfortably).
     update_epochs: int = 4           # KNOB
     clip_coef: float = 0.2           # KNOB
-    ent_coef: float = 0.1            # KNOB — start value (10x default); annealed to ent_coef_final
+    ent_coef: float = 0.01           # KNOB — start value; annealed to ent_coef_final
     ent_coef_final: float = 0.01     # KNOB — ent_coef linearly anneals to this by the last update
     vf_coef: float = 0.5             # KNOB
     max_grad_norm: float = 0.5       # KNOB
@@ -580,6 +580,9 @@ def main():
         print(f"actor warm-started from {bc_path}")
     else:
         actor = SymbolicTransformerActor().to(device)
+        print(f"WARNING: bc_init {bc_path} not found — actor trained from "
+              f"SCRATCH (random init). This will almost certainly collapse; "
+              f"pass --bc-init <existing checkpoint in ae/src>.")
     critic = CentralizedCritic().to(device)
     if args.critic_init:
         critic_path = os.path.join(here, args.critic_init)

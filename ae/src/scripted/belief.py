@@ -9,6 +9,7 @@ Bombs are split by team. `enemy_bombs` feeds the danger model. `ally_bombs`
 (til_environment friendly-fire rule), so an ally bomb is never a danger, but
 it still reveals which destructible walls are about to open.
 """
+from collections import deque
 import numpy as np
 
 from scripted.blast import walls_destroyed_by
@@ -60,6 +61,11 @@ class Belief:
         # last fired ("survive", "sweep", "first_legal", …). Read by
         # the visualizer overlay; never affects behaviour.
         self.last_layer = None
+        # Per-episode scratch state for the adaptive cascade layers (Plan 2+).
+        self.adaptive_state = {}
+        # (step, value) of collectibles the agent itself has collected; the
+        # realised forage yield-rate is read from a trailing window of this.
+        self._yield_window = deque()
 
     def reset(self, prior):
         """Start a new episode. `prior` is a team-identified MapPrior."""
@@ -75,6 +81,8 @@ class Belief:
         self.enemy_base_health = {}
         self._enemy_base_set = set(prior.enemy_bases)
         self.last_layer = None
+        self.adaptive_state = {}
+        self._yield_window = deque()
 
     def is_wall(self, a, b):
         """True if an (intact) wall separates adjacent tiles a and b."""
@@ -94,6 +102,21 @@ class Belief:
         """(x,y) -> value for collectibles believed still present."""
         return {c: v for c, v in self.prior.collectibles.items()
                 if c not in self.collected}
+
+    def realised_yield(self, window):
+        """Reward-per-tick from collectibles the agent itself took over the
+        last `window` steps. Prunes entries older than the window. Returns
+        0.0 when nothing was collected (or `window` is non-positive).
+
+        Valid only after `update()` has set the current step for this tick —
+        the cascade layers that call this run inside `decide.act()`, which is
+        always invoked after `update()`."""
+        if window <= 0:
+            return 0.0
+        cutoff = self.step - window
+        while self._yield_window and self._yield_window[0][0] < cutoff:
+            self._yield_window.popleft()
+        return sum(v for _, v in self._yield_window) / window
 
     def base_alive(self, base_cell):
         """True unless this enemy base has been seen destroyed (permanent —
@@ -206,6 +229,10 @@ class Belief:
         self.destroyed_walls |= opened
         # Own bombs (action-sourced): age each by a tick, drop the detonated.
         self.own_bombs = [(c, t - 1) for c, t in self.own_bombs if t - 1 > 0]
+        # Snapshot whether the agent stands on an as-yet-uncollected
+        # collectible; the realised-yield credit below checks the transition.
+        collecting = (self.location in self.prior.collectibles
+                      and self.location not in self.collected)
         self.enemies = set()
         self.frozen_enemies = set()
 
@@ -228,6 +255,15 @@ class Belief:
             bx, by = int(bl[0]), int(bl[1])
             r = base_vc.shape[0] // 2          # square view: rows == cols == 2r+1
             self._fold_viewcone(base_vc, lambda i, j: (bx + i - r, by + j - r))
+        # Realised-yield: the agent's own tile transitioned from a present
+        # collectible to collected this tick, so the agent just took it.
+        # This relies on the env always reporting the agent's own tile as
+        # visible in the agent viewcone — `_fold_viewcone` only writes
+        # `self.collected` for visible tiles, which the agent's own cell
+        # always is.
+        if collecting and self.location in self.collected:
+            self._yield_window.append(
+                (self.step, self.prior.collectibles[self.location]))
 
     def _update_walls(self, w, cell, gs):
         """Record any prior wall that the viewcone now shows as gone."""

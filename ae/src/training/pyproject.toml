@@ -20,4 +20,4 @@ dependencies = [
 dev = ["pytest"]
 
 [tool.uv.sources]
-til-environment = { path = "../../til-26-ae", editable = true }
+til-environment = { path = "../../../til-26-ae", editable = true }
