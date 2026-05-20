@@ -1,14 +1,18 @@
 """Manages the ASR model."""
 
 import io
+import logging
 import wave
 
 import nemo.collections.asr as nemo_asr
 import numpy as np
 import soundfile
 import torch
+from omegaconf import open_dict
 
 _MODEL_PATH = "/workspace/models/parakeet_finetuned.nemo"
+
+_LOG = logging.getLogger(__name__)
 _BATCH_SIZE = 16
 _SAMPLE_RATE = 16000
 
@@ -29,6 +33,32 @@ class ASRManager:
             self.asr_batch([self._silence_wav(8.0)] * 8)
         except Exception:
             pass
+
+    def _try_enable_cuda_graph_decoder(self) -> bool:
+        """Switch the decoder to greedy_batch + CUDA graphs.
+
+        The greedy hypotheses are mathematically identical to the current path;
+        only the per-step host overhead changes. If the installed NeMo build
+        doesn't expose the flag (older versions, non-RNNT decoders, etc.) we
+        log a warning and keep the current decoder.
+
+        Returns True if the flag was applied, False on any failure.
+        """
+        try:
+            decoding_cfg = self.model.cfg.decoding
+            with open_dict(decoding_cfg):
+                decoding_cfg.strategy = "greedy_batch"
+                if "greedy" not in decoding_cfg:
+                    decoding_cfg.greedy = {}
+                decoding_cfg.greedy.use_cuda_graph_decoder = True
+            self.model.change_decoding_strategy(decoding_cfg)
+            return True
+        except Exception as exc:
+            _LOG.warning(
+                "CUDA-graph decoder not enabled, falling back to default "
+                "greedy decoder: %s", exc,
+            )
+            return False
 
     @staticmethod
     def _silence_wav(seconds: float) -> bytes:
