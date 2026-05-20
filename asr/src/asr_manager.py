@@ -26,6 +26,11 @@ class ASRManager:
         self.model = nemo_asr.models.ASRModel.restore_from(_MODEL_PATH)
         self.model = self.model.eval().cuda()
 
+        # Enable NeMo's CUDA-graph TDT decoder. Greedy hypotheses are
+        # identical; only the per-step host overhead is removed. Falls back
+        # to the default greedy decoder if this NeMo build lacks the flag.
+        self._try_enable_cuda_graph_decoder()
+
         # Warmup: one dummy batch pays the one-time CUDA-graph capture /
         # cuDNN autotune cost at startup, so the evaluator's first real
         # request is not slowed by it. Best-effort — never block startup.
