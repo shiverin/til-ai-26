@@ -66,7 +66,7 @@ def test_asr_batch_returns_predictions_in_input_order(monkeypatch):
         staticmethod(lambda b: fake_waves[int(b)]),
     )
 
-    def fake_transcribe(signals, batch_size):
+    def fake_transcribe(signals, batch_size, verbose=None):
         return [type("H", (), {"text": f"len={len(s)}"})() for s in signals]
 
     manager.model = type("M", (), {"transcribe": staticmethod(fake_transcribe)})
@@ -91,7 +91,7 @@ def test_asr_batch_sorts_signals_before_transcribing(monkeypatch):
     )
 
     seen_lengths = []
-    def fake_transcribe(signals, batch_size):
+    def fake_transcribe(signals, batch_size, verbose=None):
         seen_lengths.extend(len(s) for s in signals)
         return [type("H", (), {"text": "x"})() for _ in signals]
 
@@ -108,6 +108,29 @@ def test_asr_batch_empty_input_returns_empty():
     manager.model = type("M", (), {"transcribe": staticmethod(lambda *a, **k: [])})
 
     assert manager.asr_batch([]) == []
+
+
+def test_asr_batch_decode_runs_in_parallel_preserving_order(monkeypatch):
+    """Parallel decode must preserve input order (executor.map guarantees this)."""
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+    manager._autocast_dtype = torch.float16
+
+    monkeypatch.setattr(
+        ASRManager, "_decode",
+        staticmethod(lambda b: np.array([int(b)], dtype=np.float32)),
+    )
+
+    seen_signals = []
+    def fake_transcribe(signals, batch_size, verbose=None):
+        seen_signals.extend(s[0] for s in signals)
+        return [type("H", (), {"text": str(int(s[0]))})() for s in signals]
+
+    manager.model = type("M", (), {"transcribe": staticmethod(fake_transcribe)})
+
+    out = manager.asr_batch([b"0", b"1", b"2", b"3", b"4"])
+
+    assert out == ["0", "1", "2", "3", "4"]
 
 
 def test_probe_batch_size_returns_largest_that_fits(monkeypatch):

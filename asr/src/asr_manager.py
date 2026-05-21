@@ -3,6 +3,7 @@
 import io
 import logging
 import wave
+from concurrent.futures import ThreadPoolExecutor
 
 import nemo.collections.asr as nemo_asr
 import numpy as np
@@ -14,6 +15,11 @@ _MODEL_PATH = "/workspace/models/parakeet_finetuned.nemo"
 
 _LOG = logging.getLogger(__name__)
 _SAMPLE_RATE = 16000
+
+# Shared decode pool — 4 workers comfortably covers typical batch sizes
+# without thrashing. soundfile.read releases the GIL so threads actually
+# parallelize the libsndfile work.
+_DECODE_POOL = ThreadPoolExecutor(max_workers=4)
 
 
 class ASRManager:
@@ -33,7 +39,7 @@ class ASRManager:
         # Probe the largest batch size that fits without OOM. The probe's
         # successful attempt also serves as the CUDA-graph warmup, so we
         # don't run a separate warmup block.
-        self._batch_size = self._probe_batch_size([64, 48, 32, 24, 16])
+        self._batch_size = self._probe_batch_size([128, 96, 64, 48, 32, 24, 16])
 
     def _try_enable_cuda_graph_decoder(self) -> bool:
         """Switch the decoder to greedy_batch + CUDA graphs.
@@ -79,7 +85,7 @@ class ASRManager:
                 dummy = [self._silence_wav(8.0)] * bs
                 signals = [self._decode(b) for b in dummy]
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    self.model.transcribe(signals, batch_size=bs)
+                    self.model.transcribe(signals, batch_size=bs, verbose=False)
                 _LOG.info("probe: locked batch_size=%d", bs)
                 return bs
             except torch.cuda.OutOfMemoryError:
@@ -142,9 +148,10 @@ class ASRManager:
             return []
 
         try:
-            # Decode each clip in memory and hand transcribe() the waveforms
-            # directly — avoids a temp-WAV write+read round-trip per clip.
-            signals = [self._decode(b) for b in audio_list]
+            # Parallel decode: GIL is released inside libsndfile, so a small
+            # thread pool overlaps WAV decoding across the batch instead of
+            # leaving the GPU idle until every clip is decoded.
+            signals = list(_DECODE_POOL.map(self._decode, audio_list))
             # Sort by length so each internal batch pads to its own max
             # rather than the global longest clip. WER-neutral (greedy TDT
             # is per-clip deterministic); only padding waste changes.
@@ -154,7 +161,7 @@ class ASRManager:
             # ops in FP32 (verified +0.0001 WER, see finetune/verify_fp16.py).
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 outputs = self.model.transcribe(
-                    sorted_signals, batch_size=self._batch_size
+                    sorted_signals, batch_size=self._batch_size, verbose=False
                 )
             sorted_texts = [
                 (getattr(o, "text", o) or "").strip() for o in outputs
