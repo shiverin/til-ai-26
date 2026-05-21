@@ -185,3 +185,4 @@ docs/
 # ASR fine-tune artifacts (large)
 asr/finetune/output/
 asr/models/*.nemo
+asr/models/encoder_trt.ts
