@@ -45,6 +45,11 @@ class ASRManager:
         # don't run a separate warmup block.
         self._batch_size = self._probe_batch_size([128, 96, 64, 48, 32, 24, 16])
 
+        # Trace + optimize the encoder. TorchScript runtime (no Triton/Inductor),
+        # so this avoids the eval-container compile path that broke Sub 4.
+        # Numerical gate inside the helper rejects any divergent trace.
+        self._try_jit_optimize_encoder()
+
     def _try_enable_cuda_graph_decoder(self) -> bool:
         """Switch the decoder to greedy_batch + CUDA graphs.
 
@@ -120,6 +125,70 @@ class ASRManager:
             "probe: every candidate OOMed, falling back to %d", candidates[-1],
         )
         return candidates[-1]
+
+    def _try_jit_optimize_encoder(self) -> bool:
+        """Trace + optimize ``self.model.encoder`` with TorchScript.
+
+        TorchScript runs the optimized graph through PyTorch's built-in runtime
+        — no Triton or Inductor, so this path survives the eval container's
+        broken Triton driver. Tracing fuses conv-bn pairs, folds constants, and
+        removes Python overhead from the encoder forward.
+
+        Numerical-validation gate: we run both eager and traced on a sample
+        input and reject the trace if outputs disagree above 1e-3 (well above
+        autocast noise, tight enough to catch real divergence). Reject = keep
+        eager, no behaviour change.
+
+        Returns True if traced encoder is now in use, False otherwise.
+        """
+        try:
+            encoder = self.model.encoder
+
+            # Representative mel-feature input at the locked batch size.
+            # Parakeet preprocessor: 80 mel bins, 100 fps. 8 s ≈ 800 frames.
+            B = max(self._batch_size, 1)
+            T = 800
+            n_mels = 80
+            example_signal = torch.randn(
+                B, n_mels, T, device="cuda", dtype=torch.float32,
+            )
+            example_length = torch.full(
+                (B,), T, device="cuda", dtype=torch.long,
+            )
+
+            with torch.no_grad():
+                traced = torch.jit.trace(
+                    encoder, (example_signal, example_length), strict=False,
+                )
+                optimized = torch.jit.optimize_for_inference(traced)
+
+                # Validate: traced output must match eager.
+                eager_out = encoder(example_signal, example_length)
+                traced_out = optimized(example_signal, example_length)
+
+            # Encoder returns (features, lengths) tuple — check both.
+            if isinstance(eager_out, tuple):
+                for e, t in zip(eager_out, traced_out):
+                    if not torch.allclose(e.float(), t.float(),
+                                           atol=1e-3, rtol=1e-3):
+                        _LOG.warning(
+                            "jit-traced encoder diverges from eager; reverting",
+                        )
+                        return False
+            else:
+                if not torch.allclose(eager_out.float(), traced_out.float(),
+                                       atol=1e-3, rtol=1e-3):
+                    _LOG.warning(
+                        "jit-traced encoder diverges from eager; reverting",
+                    )
+                    return False
+
+            self.model.encoder = optimized
+            _LOG.info("encoder jit-traced + optimized_for_inference")
+            return True
+        except Exception as exc:
+            _LOG.warning("encoder jit optimize skipped: %s", exc)
+            return False
 
     @staticmethod
     def _silence_wav(seconds: float) -> bytes:

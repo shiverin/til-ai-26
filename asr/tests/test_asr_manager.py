@@ -204,3 +204,78 @@ def test_pick_autocast_dtype_falls_back_to_fp16_on_turing(monkeypatch):
     assert ASRManager._pick_autocast_dtype() is torch.float16
 
 
+def test_try_jit_optimize_encoder_swaps_on_match(monkeypatch):
+    """Happy path: trace succeeds, output matches eager, swap occurs."""
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+
+    class FakeEncoder(torch.nn.Module):
+        def forward(self, audio_signal, length):
+            return audio_signal.sum(dim=-1), length.float()
+
+    eager = FakeEncoder()
+    manager.model = type("M", (), {"encoder": eager})()
+
+    class MirrorTraced(torch.nn.Module):
+        def __init__(self, inner): super().__init__(); self.inner = inner
+        def forward(self, audio_signal, length):
+            return self.inner(audio_signal, length)
+
+    def fake_trace(mod, example, **kwargs):
+        return MirrorTraced(mod)
+
+    def fake_optimize(scripted):
+        return scripted
+
+    monkeypatch.setattr(torch.jit, "trace", fake_trace)
+    monkeypatch.setattr(torch.jit, "optimize_for_inference", fake_optimize)
+
+    assert manager._try_jit_optimize_encoder() is True
+    assert manager.model.encoder is not eager
+
+
+def test_try_jit_optimize_encoder_fallback_on_trace_failure(monkeypatch):
+    """Fallback: torch.jit.trace raises; encoder unchanged."""
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+
+    eager = object()
+    manager.model = type("M", (), {"encoder": eager})()
+
+    def fake_trace(*a, **kw):
+        raise RuntimeError("trace failed")
+
+    monkeypatch.setattr(torch.jit, "trace", fake_trace)
+
+    assert manager._try_jit_optimize_encoder() is False
+    assert manager.model.encoder is eager
+
+
+def test_try_jit_optimize_encoder_fallback_on_divergent_output(monkeypatch):
+    """Fallback: trace succeeds but output diverges; encoder unchanged."""
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+
+    class FakeEncoder(torch.nn.Module):
+        def forward(self, audio_signal, length):
+            return audio_signal.sum(dim=-1), length.float()
+
+    eager = FakeEncoder()
+    manager.model = type("M", (), {"encoder": eager})()
+
+    class DivergentTraced(torch.nn.Module):
+        def forward(self, audio_signal, length):
+            return audio_signal.sum(dim=-1) + 999.0, length.float()
+
+    def fake_trace(*a, **kw):
+        return DivergentTraced()
+
+    def fake_optimize(scripted):
+        return scripted
+
+    monkeypatch.setattr(torch.jit, "trace", fake_trace)
+    monkeypatch.setattr(torch.jit, "optimize_for_inference", fake_optimize)
+
+    assert manager._try_jit_optimize_encoder() is False
+    assert manager.model.encoder is eager
+
