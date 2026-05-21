@@ -40,11 +40,6 @@ class ASRManager:
         self._autocast_dtype = self._pick_autocast_dtype()
         _LOG.info("autocast dtype: %s", self._autocast_dtype)
 
-        # Compile the encoder with torch.compile. Inductor fuses kernels
-        # and (in reduce-overhead mode) wraps them in CUDA graphs. Silent
-        # fallback to eager on failure — no behavior change either way.
-        self._try_compile_encoder()
-
         # Probe the largest batch size that fits without OOM. The probe's
         # successful attempt also serves as the CUDA-graph warmup, so we
         # don't run a separate warmup block.
@@ -86,28 +81,6 @@ class ASRManager:
         return (
             torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         )
-
-    def _try_compile_encoder(self) -> bool:
-        """Compile ``self.model.encoder`` with torch.compile.
-
-        ``reduce-overhead`` enables Inductor's CUDA-graph wrapping for the
-        encoder forward pass (separate cache from NeMo's TDT decoder graph;
-        they do not collide). ``dynamic=True`` lets clip-length variation
-        avoid per-shape recompiles.
-
-        On any failure we keep the eager encoder and return False. The model
-        still works correctly, we just lose this submission's win.
-        """
-        try:
-            compiled = torch.compile(
-                self.model.encoder, mode="reduce-overhead", dynamic=True,
-            )
-            self.model.encoder = compiled
-            _LOG.info("encoder compiled with torch.compile (reduce-overhead)")
-            return True
-        except Exception as exc:
-            _LOG.warning("encoder compile skipped: %s", exc)
-            return False
 
     def _probe_batch_size(self, candidates: list[int]) -> int:
         """Find the largest batch size in ``candidates`` that does not OOM.
