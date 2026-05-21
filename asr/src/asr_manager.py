@@ -31,6 +31,9 @@ class ASRManager:
         # to the default greedy decoder if this NeMo build lacks the flag.
         self._try_enable_cuda_graph_decoder()
 
+        # Interim default; Task 2 replaces this with a startup probe.
+        self._batch_size = 16
+
         # Warmup: one dummy batch pays the one-time CUDA-graph capture /
         # cuDNN autotune cost at startup, so the evaluator's first real
         # request is not slowed by it. Best-effort — never block startup.
@@ -112,15 +115,25 @@ class ASRManager:
             # Decode each clip in memory and hand transcribe() the waveforms
             # directly — avoids a temp-WAV write+read round-trip per clip.
             signals = [self._decode(b) for b in audio_list]
-            # FP16 autocast uses the T4's FP16 tensor cores while keeping
-            # sensitive ops in FP32 (verified +0.0001 WER, see
-            # finetune/verify_fp16.py). transcribe() batches internally and
-            # returns hypotheses in input order.
+            # Sort by length so each internal batch pads to its own max
+            # rather than the global longest clip. WER-neutral (greedy TDT
+            # is per-clip deterministic); only padding waste changes.
+            order = sorted(range(len(signals)), key=lambda i: len(signals[i]))
+            sorted_signals = [signals[i] for i in order]
+            # FP16 autocast uses FP16 tensor cores while keeping sensitive
+            # ops in FP32 (verified +0.0001 WER, see finetune/verify_fp16.py).
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 outputs = self.model.transcribe(
-                    signals, batch_size=_BATCH_SIZE
+                    sorted_signals, batch_size=self._batch_size
                 )
-            return [(getattr(o, "text", o) or "").strip() for o in outputs]
+            sorted_texts = [
+                (getattr(o, "text", o) or "").strip() for o in outputs
+            ]
+            # Invert the permutation to return predictions in input order.
+            result = [""] * len(signals)
+            for original_idx, text in zip(order, sorted_texts):
+                result[original_idx] = text
+            return result
         except Exception:
             # A failure must not crash the whole batch.
             return [""] * len(audio_list)
