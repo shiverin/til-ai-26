@@ -2,6 +2,7 @@
 
 import io
 import logging
+import os
 import wave
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,6 +13,7 @@ import torch
 from omegaconf import open_dict
 
 _MODEL_PATH = "/workspace/models/parakeet_finetuned.nemo"
+_TRT_ENCODER_PATH = "/workspace/models/encoder_trt.ts"
 
 _LOG = logging.getLogger(__name__)
 _SAMPLE_RATE = 16000
@@ -45,10 +47,11 @@ class ASRManager:
         # don't run a separate warmup block.
         self._batch_size = self._probe_batch_size([128, 96, 64, 48, 32, 24, 16])
 
-        # Trace + optimize the encoder. TorchScript runtime (no Triton/Inductor),
-        # so this avoids the eval-container compile path that broke Sub 4.
-        # Numerical gate inside the helper rejects any divergent trace.
-        self._try_jit_optimize_encoder()
+        # Try TRT engine first. If loaded successfully, skip TorchScript jit
+        # (they target the same module; TRT supersedes jit). On failure, fall
+        # back to jit, which itself falls back to eager.
+        if not self._try_load_trt_encoder():
+            self._try_jit_optimize_encoder()
 
     def _try_enable_cuda_graph_decoder(self) -> bool:
         """Switch the decoder to greedy_batch + CUDA graphs.
@@ -125,6 +128,75 @@ class ASRManager:
             "probe: every candidate OOMed, falling back to %d", candidates[-1],
         )
         return candidates[-1]
+
+    def _try_load_trt_encoder(self) -> bool:
+        """Load pre-compiled TensorRT engine for the encoder.
+
+        The engine was built offline (asr/finetune/build_trt_encoder.py) and
+        baked into the image. We load it via torch.jit.load and replace the
+        eager encoder.
+
+        Numerical-validation gate: 1e-2 tolerance (looser than the TorchScript
+        path because FP16 TRT diverges further from FP32 eager). Reject =
+        keep eager.
+
+        Returns True if TRT encoder is now in use, False otherwise (server
+        continues with eager encoder, no behaviour change).
+        """
+        if not os.path.exists(_TRT_ENCODER_PATH):
+            _LOG.info(
+                "no TRT engine at %s; keeping eager", _TRT_ENCODER_PATH,
+            )
+            return False
+        try:
+            # Importing torch_tensorrt registers the TRT runtime libs so the
+            # loaded TorchScript can call into them. Import-and-forget.
+            try:
+                import torch_tensorrt  # noqa: F401
+            except ImportError:
+                _LOG.warning(
+                    "torch_tensorrt not available; TRT engine cannot be loaded",
+                )
+                return False
+
+            trt_encoder = torch.jit.load(_TRT_ENCODER_PATH)
+            encoder = self.model.encoder
+
+            B = max(self._batch_size, 1)
+            T = 800
+            example_signal = torch.randn(
+                B, 80, T, device="cuda", dtype=torch.float32,
+            )
+            example_length = torch.full(
+                (B,), T, device="cuda", dtype=torch.long,
+            )
+
+            with torch.no_grad():
+                eager_out = encoder(example_signal, example_length)
+                trt_out = trt_encoder(example_signal, example_length)
+
+            if isinstance(eager_out, tuple):
+                for e, t in zip(eager_out, trt_out):
+                    if not torch.allclose(e.float(), t.float(),
+                                           atol=1e-2, rtol=1e-2):
+                        _LOG.warning(
+                            "TRT encoder diverges from eager; reverting",
+                        )
+                        return False
+            else:
+                if not torch.allclose(eager_out.float(), trt_out.float(),
+                                       atol=1e-2, rtol=1e-2):
+                    _LOG.warning(
+                        "TRT encoder diverges from eager; reverting",
+                    )
+                    return False
+
+            self.model.encoder = trt_encoder
+            _LOG.info("encoder swapped to TensorRT engine")
+            return True
+        except Exception as exc:
+            _LOG.warning("TRT encoder load skipped: %s", exc)
+            return False
 
     def _try_jit_optimize_encoder(self) -> bool:
         """Trace + optimize ``self.model.encoder`` with TorchScript.

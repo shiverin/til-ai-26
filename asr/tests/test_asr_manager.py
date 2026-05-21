@@ -279,3 +279,64 @@ def test_try_jit_optimize_encoder_fallback_on_divergent_output(monkeypatch):
     assert manager._try_jit_optimize_encoder() is False
     assert manager.model.encoder is eager
 
+
+def test_try_load_trt_encoder_returns_false_when_engine_missing(monkeypatch, tmp_path):
+    """If the engine file doesn't exist, helper returns False without raising."""
+    import asr.src.asr_manager as am
+    monkeypatch.setattr(am, "_TRT_ENCODER_PATH", str(tmp_path / "nonexistent.ts"))
+
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+    manager.model = type("M", (), {"encoder": object()})()
+    eager = manager.model.encoder
+
+    assert manager._try_load_trt_encoder() is False
+    assert manager.model.encoder is eager
+
+
+def test_try_load_trt_encoder_swallows_load_failure(monkeypatch, tmp_path):
+    """If torch.jit.load raises, helper returns False, encoder unchanged."""
+    import asr.src.asr_manager as am
+    engine_path = tmp_path / "fake.ts"
+    engine_path.write_bytes(b"not a real engine")
+    monkeypatch.setattr(am, "_TRT_ENCODER_PATH", str(engine_path))
+
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+    manager.model = type("M", (), {"encoder": object()})()
+    eager = manager.model.encoder
+
+    def fake_load(path):
+        raise RuntimeError("invalid TorchScript")
+
+    monkeypatch.setattr(torch.jit, "load", fake_load)
+
+    assert manager._try_load_trt_encoder() is False
+    assert manager.model.encoder is eager
+
+
+def test_try_load_trt_encoder_rejects_divergent_output(monkeypatch, tmp_path):
+    """If TRT output diverges from eager, encoder is not swapped."""
+    import asr.src.asr_manager as am
+    engine_path = tmp_path / "fake.ts"
+    engine_path.write_bytes(b"not real")
+    monkeypatch.setattr(am, "_TRT_ENCODER_PATH", str(engine_path))
+
+    class FakeEncoder(torch.nn.Module):
+        def forward(self, audio_signal, length):
+            return audio_signal.sum(dim=-1), length.float()
+
+    class DivergentTRT(torch.nn.Module):
+        def forward(self, audio_signal, length):
+            return audio_signal.sum(dim=-1) + 999.0, length.float()
+
+    manager = ASRManager.__new__(ASRManager)
+    manager._batch_size = 4
+    eager = FakeEncoder()
+    manager.model = type("M", (), {"encoder": eager})()
+
+    monkeypatch.setattr(torch.jit, "load", lambda path: DivergentTRT())
+
+    assert manager._try_load_trt_encoder() is False
+    assert manager.model.encoder is eager
+
