@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -107,3 +108,62 @@ def test_asr_batch_empty_input_returns_empty():
     manager.model = type("M", (), {"transcribe": staticmethod(lambda *a, **k: [])})
 
     assert manager.asr_batch([]) == []
+
+
+def test_probe_batch_size_returns_largest_that_fits(monkeypatch):
+    """Probe: skips OOM candidates, returns first one that succeeds."""
+    manager = ASRManager.__new__(ASRManager)
+
+    def fake_transcribe(signals, batch_size):
+        if batch_size > 32:
+            raise torch.cuda.OutOfMemoryError("simulated OOM")
+        return [type("H", (), {"text": "x"})() for _ in signals]
+
+    manager.model = type("M", (), {"transcribe": staticmethod(fake_transcribe)})
+
+    monkeypatch.setattr(
+        ASRManager, "_decode",
+        staticmethod(lambda b: np.zeros(8000, dtype=np.float32)),
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    chosen = manager._probe_batch_size([64, 48, 32, 24, 16])
+    assert chosen == 32
+
+
+def test_probe_batch_size_handles_runtime_oom_string(monkeypatch):
+    """Probe: also handles RuntimeError whose message contains 'out of memory'."""
+    manager = ASRManager.__new__(ASRManager)
+
+    def fake_transcribe(signals, batch_size):
+        if batch_size > 24:
+            raise RuntimeError("CUDA out of memory. tried to allocate ...")
+        return [type("H", (), {"text": "x"})() for _ in signals]
+
+    manager.model = type("M", (), {"transcribe": staticmethod(fake_transcribe)})
+    monkeypatch.setattr(
+        ASRManager, "_decode",
+        staticmethod(lambda b: np.zeros(8000, dtype=np.float32)),
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    chosen = manager._probe_batch_size([64, 48, 32, 24, 16])
+    assert chosen == 24
+
+
+def test_probe_batch_size_reraises_non_oom_runtime(monkeypatch):
+    """Probe: non-OOM RuntimeError propagates (real bug, not capacity)."""
+    manager = ASRManager.__new__(ASRManager)
+
+    def fake_transcribe(signals, batch_size):
+        raise RuntimeError("some other failure")
+
+    manager.model = type("M", (), {"transcribe": staticmethod(fake_transcribe)})
+    monkeypatch.setattr(
+        ASRManager, "_decode",
+        staticmethod(lambda b: np.zeros(8000, dtype=np.float32)),
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    with pytest.raises(RuntimeError, match="some other failure"):
+        manager._probe_batch_size([16])

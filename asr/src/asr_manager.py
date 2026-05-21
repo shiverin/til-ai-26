@@ -13,7 +13,6 @@ from omegaconf import open_dict
 _MODEL_PATH = "/workspace/models/parakeet_finetuned.nemo"
 
 _LOG = logging.getLogger(__name__)
-_BATCH_SIZE = 16
 _SAMPLE_RATE = 16000
 
 
@@ -31,16 +30,10 @@ class ASRManager:
         # to the default greedy decoder if this NeMo build lacks the flag.
         self._try_enable_cuda_graph_decoder()
 
-        # Interim default; Task 2 replaces this with a startup probe.
-        self._batch_size = 16
-
-        # Warmup: one dummy batch pays the one-time CUDA-graph capture /
-        # cuDNN autotune cost at startup, so the evaluator's first real
-        # request is not slowed by it. Best-effort — never block startup.
-        try:
-            self.asr_batch([self._silence_wav(8.0)] * 8)
-        except Exception:
-            pass
+        # Probe the largest batch size that fits without OOM. The probe's
+        # successful attempt also serves as the CUDA-graph warmup, so we
+        # don't run a separate warmup block.
+        self._batch_size = self._probe_batch_size([64, 48, 32, 24, 16])
 
     def _try_enable_cuda_graph_decoder(self) -> bool:
         """Switch the decoder to greedy_batch + CUDA graphs.
@@ -69,6 +62,43 @@ class ASRManager:
                 "greedy decoder: %s", exc,
             )
             return False
+
+    def _probe_batch_size(self, candidates: list[int]) -> int:
+        """Find the largest batch size in ``candidates`` that does not OOM.
+
+        Each candidate runs one transcribe() over silence at that batch size.
+        The successful attempt also serves as the CUDA-graph warmup, so the
+        first real request after startup does not pay graph-capture cost.
+
+        If every candidate OOMs (shouldn't happen — the smallest is 16, which
+        is what we already shipped successfully), returns the last candidate
+        so the server still comes up.
+        """
+        for bs in candidates:
+            try:
+                dummy = [self._silence_wav(8.0)] * bs
+                signals = [self._decode(b) for b in dummy]
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    self.model.transcribe(signals, batch_size=bs)
+                _LOG.info("probe: locked batch_size=%d", bs)
+                return bs
+            except torch.cuda.OutOfMemoryError:
+                _LOG.info("probe: batch_size=%d OOM, trying smaller", bs)
+                torch.cuda.empty_cache()
+                continue
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    _LOG.info(
+                        "probe: batch_size=%d OOM (RuntimeError), trying "
+                        "smaller", bs,
+                    )
+                    torch.cuda.empty_cache()
+                    continue
+                raise
+        _LOG.warning(
+            "probe: every candidate OOMed, falling back to %d", candidates[-1],
+        )
+        return candidates[-1]
 
     @staticmethod
     def _silence_wav(seconds: float) -> bytes:
