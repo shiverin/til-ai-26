@@ -190,3 +190,15 @@ def test_probe_batch_size_reraises_non_oom_runtime(monkeypatch):
 
     with pytest.raises(RuntimeError, match="some other failure"):
         manager._probe_batch_size([16])
+
+
+def test_pick_autocast_dtype_prefers_bf16_when_supported(monkeypatch):
+    """On Ampere+ (bf16-supported) we pick bfloat16."""
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    assert ASRManager._pick_autocast_dtype() is torch.bfloat16
+
+
+def test_pick_autocast_dtype_falls_back_to_fp16_on_turing(monkeypatch):
+    """On Turing (no native bf16) we stay on fp16."""
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: False)
+    assert ASRManager._pick_autocast_dtype() is torch.float16

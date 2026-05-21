@@ -36,6 +36,10 @@ class ASRManager:
         # to the default greedy decoder if this NeMo build lacks the flag.
         self._try_enable_cuda_graph_decoder()
 
+        # Pick autocast dtype once at startup based on hardware capability.
+        self._autocast_dtype = self._pick_autocast_dtype()
+        _LOG.info("autocast dtype: %s", self._autocast_dtype)
+
         # Probe the largest batch size that fits without OOM. The probe's
         # successful attempt also serves as the CUDA-graph warmup, so we
         # don't run a separate warmup block.
@@ -69,6 +73,15 @@ class ASRManager:
             )
             return False
 
+    @staticmethod
+    def _pick_autocast_dtype() -> torch.dtype:
+        """BF16 on Ampere+ (same speed as FP16, better dynamic range, no NaN
+        risk). FP16 on Turing where BF16 isn't supported in hardware.
+        """
+        return (
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+
     def _probe_batch_size(self, candidates: list[int]) -> int:
         """Find the largest batch size in ``candidates`` that does not OOM.
 
@@ -84,7 +97,9 @@ class ASRManager:
             try:
                 dummy = [self._silence_wav(8.0)] * bs
                 signals = [self._decode(b) for b in dummy]
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                with torch.autocast(
+                    device_type="cuda", dtype=self._autocast_dtype
+                ):
                     self.model.transcribe(signals, batch_size=bs, verbose=False)
                 _LOG.info("probe: locked batch_size=%d", bs)
                 return bs
@@ -159,7 +174,9 @@ class ASRManager:
             sorted_signals = [signals[i] for i in order]
             # FP16 autocast uses FP16 tensor cores while keeping sensitive
             # ops in FP32 (verified +0.0001 WER, see finetune/verify_fp16.py).
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(
+                device_type="cuda", dtype=self._autocast_dtype
+            ):
                 outputs = self.model.transcribe(
                     sorted_signals, batch_size=self._batch_size, verbose=False
                 )
