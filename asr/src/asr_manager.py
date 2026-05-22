@@ -13,7 +13,8 @@ import torch
 from omegaconf import open_dict
 
 _MODEL_PATH = "/workspace/models/parakeet_finetuned.nemo"
-_TRT_ENCODER_PATH = "/workspace/models/encoder_trt.ts"
+_TRT_ENCODER_PATH = "/workspace/models/encoder.trt"
+_ENCODER_N_MELS = 128  # Parakeet preprocessor outputs 128-bin mel features.
 
 _LOG = logging.getLogger(__name__)
 _SAMPLE_RATE = 16000
@@ -22,6 +23,66 @@ _SAMPLE_RATE = 16000
 # without thrashing. soundfile.read releases the GIL so threads actually
 # parallelize the libsndfile work.
 _DECODE_POOL = ThreadPoolExecutor(max_workers=4)
+
+
+class _TRTEncoder(torch.nn.Module):
+    """Drop-in encoder forward backed by a pre-compiled TensorRT engine.
+
+    The engine is built offline from the NeMo Conformer encoder's ONNX
+    export (asr/finetune/build_trt_encoder.sh) and baked into the image.
+    Forward signature matches NeMo's encoder: takes (audio_signal, length)
+    and returns (encoded, encoded_lengths).
+    """
+
+    def __init__(self, engine_path: str) -> None:
+        super().__init__()
+        import tensorrt as trt  # local import; only used at startup
+
+        logger = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, "rb") as f:
+            runtime = trt.Runtime(logger)
+            self._engine = runtime.deserialize_cuda_engine(f.read())
+        if self._engine is None:
+            raise RuntimeError(
+                f"failed to deserialize TRT engine at {engine_path}"
+            )
+        self._context = self._engine.create_execution_context()
+
+    def forward(self, audio_signal: torch.Tensor, length: torch.Tensor):
+        # TRT requires contiguous CUDA tensors of the expected dtypes.
+        audio_signal = audio_signal.contiguous().to(
+            dtype=torch.float32, device="cuda",
+        )
+        length = length.contiguous().to(
+            dtype=torch.int64, device="cuda",
+        )
+
+        ctx = self._context
+        ctx.set_input_shape("audio_signal", tuple(audio_signal.shape))
+        ctx.set_input_shape("length", tuple(length.shape))
+
+        out_shape = tuple(ctx.get_tensor_shape("outputs"))
+        enc_len_shape = tuple(ctx.get_tensor_shape("encoded_lengths"))
+
+        outputs = torch.empty(
+            out_shape, dtype=torch.float32, device="cuda",
+        )
+        encoded_lengths = torch.empty(
+            enc_len_shape, dtype=torch.int64, device="cuda",
+        )
+
+        ctx.set_tensor_address("audio_signal", audio_signal.data_ptr())
+        ctx.set_tensor_address("length", length.data_ptr())
+        ctx.set_tensor_address("outputs", outputs.data_ptr())
+        ctx.set_tensor_address("encoded_lengths", encoded_lengths.data_ptr())
+
+        stream = torch.cuda.current_stream().cuda_stream
+        ok = ctx.execute_async_v3(stream_handle=stream)
+        if not ok:
+            raise RuntimeError("TRT execute_async_v3 returned False")
+        torch.cuda.current_stream().synchronize()
+
+        return outputs, encoded_lengths
 
 
 class ASRManager:
@@ -130,18 +191,19 @@ class ASRManager:
         return candidates[-1]
 
     def _try_load_trt_encoder(self) -> bool:
-        """Load pre-compiled TensorRT engine for the encoder.
+        """Load pre-compiled TensorRT engine and swap it in for the encoder.
 
-        The engine was built offline (asr/finetune/build_trt_encoder.py) and
-        baked into the image. We load it via torch.jit.load and replace the
-        eager encoder.
+        The engine is built offline from the NeMo encoder's ONNX export and
+        baked into the Docker image at ``_TRT_ENCODER_PATH``. We construct
+        a ``_TRTEncoder`` wrapper around the engine and use it as a drop-in
+        replacement for ``self.model.encoder``.
 
-        Numerical-validation gate: 1e-2 tolerance (looser than the TorchScript
-        path because FP16 TRT diverges further from FP32 eager). Reject =
-        keep eager.
+        Numerical-validation gate: 1e-2 tolerance against eager output. FP16
+        TRT drifts from FP32 eager more than autocast does, so the gate is
+        looser than the TorchScript path. Reject = keep eager.
 
-        Returns True if TRT encoder is now in use, False otherwise (server
-        continues with eager encoder, no behaviour change).
+        Returns True if TRT encoder is now in use, False otherwise. Either
+        way the server continues to serve correctly.
         """
         if not os.path.exists(_TRT_ENCODER_PATH):
             _LOG.info(
@@ -149,43 +211,38 @@ class ASRManager:
             )
             return False
         try:
-            # Importing torch_tensorrt registers the TRT runtime libs so the
-            # loaded TorchScript can call into them. Import-and-forget.
-            try:
-                import torch_tensorrt  # noqa: F401
-            except ImportError:
-                _LOG.warning(
-                    "torch_tensorrt not available; TRT engine cannot be loaded",
-                )
-                return False
-
-            trt_encoder = torch.jit.load(_TRT_ENCODER_PATH)
+            trt_encoder = _TRTEncoder(_TRT_ENCODER_PATH)
             encoder = self.model.encoder
 
             B = max(self._batch_size, 1)
-            T = 800
+            T = 800  # 8 s at 100 fps mel
             example_signal = torch.randn(
-                B, 80, T, device="cuda", dtype=torch.float32,
+                B, _ENCODER_N_MELS, T, device="cuda", dtype=torch.float32,
             )
             example_length = torch.full(
                 (B,), T, device="cuda", dtype=torch.long,
             )
 
             with torch.no_grad():
-                eager_out = encoder(example_signal, example_length)
+                eager_out = encoder(
+                    audio_signal=example_signal, length=example_length,
+                )
                 trt_out = trt_encoder(example_signal, example_length)
 
             if isinstance(eager_out, tuple):
                 for e, t in zip(eager_out, trt_out):
-                    if not torch.allclose(e.float(), t.float(),
-                                           atol=1e-2, rtol=1e-2):
+                    if not torch.allclose(
+                        e.float(), t.float(), atol=1e-2, rtol=1e-2,
+                    ):
                         _LOG.warning(
                             "TRT encoder diverges from eager; reverting",
                         )
                         return False
             else:
-                if not torch.allclose(eager_out.float(), trt_out.float(),
-                                       atol=1e-2, rtol=1e-2):
+                if not torch.allclose(
+                    eager_out.float(), trt_out.float(),
+                    atol=1e-2, rtol=1e-2,
+                ):
                     _LOG.warning(
                         "TRT encoder diverges from eager; reverting",
                     )
