@@ -30,5 +30,8 @@ ENV HF_HUB_OFFLINE=1
 # Copies your source files.
 COPY src .
 
+# The post-processing package (numbers + spelling_norm + disfluency).
+COPY postprocess ./postprocess
+
 # Starts your model server.
 CMD uvicorn asr_server:app --port 5001 --host 0.0.0.0
