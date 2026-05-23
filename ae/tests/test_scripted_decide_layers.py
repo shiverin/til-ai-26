@@ -205,27 +205,49 @@ def test_openness_isolated_pocket_scores_one():
 # --- survive Tier 1: full escape, openness bias, opportunistic bomb drop ---
 
 def test_survive_tier1_routes_to_safety():
-    """One bomb, plenty of escape time, only 1 bomb in hand (below bomb_drop_min)
-    -> survive routes toward safety with a move, no bomb drop."""
-    b = _strike_belief(_base_prior(grid_size=5), (3, 2), team_bombs=1)
+    """A live base in the prior + 1 bomb (< bomb_drop_min=6) — survive
+    hoards the bomb and routes toward safety with a move. Agent at (3, 2)
+    is Chebyshev 3 from the base at (0, 4), so neither Case B nor Case A
+    of the strike caveat triggers (no safe hit-tile is reachable from
+    inside the blast at (1, 2))."""
+    b = _strike_belief(_base_prior(grid_size=5, enemy_bases=((0, 4),)),
+                       (3, 2), team_bombs=1)
     danger = DangerMap({(1, 2): 4}, b)            # blast covers x0..3, agent at (3,2)
     p = build_planner(b, danger)
     assert survive(b, danger, p, StrategyParams()) == 0     # FORWARD toward x=4 safety
 
 
-def test_survive_tier1_drops_surplus_bomb():
-    """Same escape, but 3 bombs in hand and the chosen safe cell is 1 step away
-    -> drop a bomb first (1 + 1 place + 1 buffer <= 4 ticks)."""
-    b = _strike_belief(_base_prior(grid_size=5), (3, 2), team_bombs=3)
+def test_survive_tier1_drops_surplus_bomb_in_endgame():
+    """No live base + 3 bombs in hand + chosen safe cell 1 step away ->
+    survive's bomb_drop floor collapses to 1 in the endgame, so the agent
+    drops the bomb first (1 + 1 place + 1 buffer <= 4 ticks)."""
+    b = _strike_belief(_base_prior(grid_size=5, enemy_bases=()), (3, 2),
+                       team_bombs=3)
     danger = DangerMap({(1, 2): 4}, b)
     p = build_planner(b, danger)
     assert survive(b, danger, p, StrategyParams()) == 5     # PLACE_BOMB
 
 
+def test_survive_tier1_holds_fire_below_bomb_drop_min_while_bases_live():
+    """With a live enemy base AND 3 bombs in hand (below the default
+    `bomb_drop_min=6`), survive does NOT spend a bomb while fleeing — bombs
+    are hoarded for the base offense. Agent placed at (0, 2) so it is
+    Chebyshev > 2 from the base at (0, 4) for hit-tile purposes (avoiding
+    the strike caveat)."""
+    b = _strike_belief(_base_prior(grid_size=5, enemy_bases=((0, 4),)),
+                       (0, 2), team_bombs=3)
+    danger = DangerMap({(1, 2): 4}, b)
+    p = build_planner(b, danger)
+    action = survive(b, danger, p, StrategyParams())
+    # Bombs (3) < default bomb_drop_min (6) AND base alive → no bomb drop.
+    assert action != 5                          # not PLACE_BOMB
+
+
 def test_survive_tier1_no_bomb_without_spare_time():
     """3 bombs in hand but the agent is at the blast centre -> the nearest safe
-    cell is 3 steps away, 3 + 1 + 1 > 4, so no bomb: just flee."""
-    b = _strike_belief(_base_prior(grid_size=5), (1, 2), team_bombs=3)
+    cell is 3 steps away, 3 + 1 + 1 > 4, so no bomb: just flee. No live base."""
+    b = _strike_belief(_base_prior(grid_size=5, enemy_bases=()), (1, 2),
+                       team_bombs=3)
     danger = DangerMap({(1, 2): 4}, b)
     p = build_planner(b, danger)
     assert survive(b, danger, p, StrategyParams()) == 0     # FORWARD, no PLACE_BOMB
@@ -234,8 +256,9 @@ def test_survive_tier1_no_bomb_without_spare_time():
 def test_survive_avoids_dead_end_pocket():
     """Four equidistant safe cells; (0,3) is a walled-off pocket. survive's
     openness bias must pick an open cell, never the pocket (BACKWARD heads
-    to the pocket from (3,3) facing RIGHT)."""
-    prior = _base_prior(grid_size=7, wall_between={
+    to the pocket from (3,3) facing RIGHT). No live base, so strike caveat
+    doesn't preempt the openness logic."""
+    prior = _base_prior(grid_size=7, enemy_bases=(), wall_between={
         frozenset({(0, 3), (0, 2)}): False,
         frozenset({(0, 3), (0, 4)}): False,
     })
@@ -267,6 +290,64 @@ def test_survive_tier2_yields_when_least_bad():
     assert survive(b, danger, p, StrategyParams()) is None
 
 
+# --- survive strike caveat (Case B place-and-escape, Case A safe-tile) -----
+
+def test_survive_strike_caveat_case_b_places_at_loc():
+    """Agent at a hit-tile of a live base AND in danger AND a safe escape
+    exists in deadline-1 phases — Case B fires, return PLACE_BOMB."""
+    b = _strike_belief(_base_prior(grid_size=7, enemy_bases=((3, 3),)),
+                       (3, 5), team_bombs=1)
+    b.enemy_bombs = {(3, 5): 4}                   # timer = lethal phase 4 (post-shift)
+    danger = DangerMap(b.enemy_bombs, b)
+    p = build_planner(b, danger)
+    # Loc (3, 5) reaches base (3, 3) at Chebyshev 2 — a hit-tile. Safe cell
+    # at (6, 5) reachable in 3 moves (< deadline - 1 = 3 phases). Case B fires.
+    assert survive(b, danger, p, StrategyParams()) == 5     # PLACE_BOMB
+
+
+def test_survive_strike_caveat_case_a_routes_to_safe_hit_tile():
+    """Agent in danger, loc is NOT a hit-tile, but a SAFE hit-tile is reachable
+    by the deadline — Case A fires, route toward it."""
+    b = _strike_belief(_base_prior(grid_size=9, enemy_bases=((6, 4),)),
+                       (2, 4), team_bombs=1)
+    b.enemy_bombs = {(2, 4): 5}                   # lethal phase 5
+    danger = DangerMap(b.enemy_bombs, b)
+    p = build_planner(b, danger)
+    # Loc (2, 4) is Chebyshev 4 from base (6, 4) — NOT a hit-tile. A safe
+    # hit-tile (7, 4) sits 5 cardinal moves away; planner.dist == 5 == deadline.
+    # Case A picks it; first action is FORWARD (= 0).
+    assert survive(b, danger, p, StrategyParams()) == 0
+
+
+def test_survive_strike_caveat_yields_when_no_live_bases():
+    """No live enemy base — caveat skips, normal tier-1 runs. With no live
+    bases the `bomb_drop_min` floor collapses to 1, so a single bomb in
+    hand triggers the opportunistic drop; assert the action is a strike or
+    flee, just NOT a STAY (= 4)."""
+    b = _strike_belief(_base_prior(grid_size=5, enemy_bases=()),
+                       (3, 2), team_bombs=1)
+    b.enemy_bombs = {(1, 2): 4}
+    danger = DangerMap(b.enemy_bombs, b)
+    p = build_planner(b, danger)
+    action = survive(b, danger, p, StrategyParams())
+    assert action is not None and action != 4
+
+
+def test_survive_strike_caveat_yields_when_own_bombs_already_finish():
+    """Loc IS a hit-tile but our in-flight bombs already cover the base's HP —
+    no point bombing again. Caveat skips, normal tier-1 flee runs."""
+    b = _strike_belief(_base_prior(grid_size=7, enemy_bases=((3, 3),)),
+                       (3, 5), team_bombs=1)
+    b.enemy_base_health = {(3, 3): 0.2}            # 20 HP observed
+    b.own_bombs = [((3, 3), 3)]                    # 1 in-flight hit = 20 damage
+    b.enemy_bombs = {(3, 5): 4}
+    danger = DangerMap(b.enemy_bombs, b)
+    p = build_planner(b, danger)
+    # 20 damage >= 20 HP — base will already die. Caveat yields → tier-1 flee.
+    action = survive(b, danger, p, StrategyParams())
+    assert action != 5                              # NOT PLACE_BOMB
+
+
 # --- strike: two-scenario wall breach -------------------------------------
 
 def _walled_base_prior():
@@ -282,9 +363,10 @@ def _walled_base_prior():
 
 
 def test_strike_breaches_a_wall_to_reach_a_base():
-    """With spare bombs and a base reachable only by breaching, strike drops a
-    bomb now — scenario B reaches a hit-tile, scenario A never does."""
-    b = _strike_belief(_walled_base_prior(), (1, 3), team_bombs=3)
+    """With enough bombs to clear `breach_min_bombs=6` and a base reachable
+    only by breaching, strike drops a bomb now — scenario B reaches a
+    hit-tile, scenario A never does."""
+    b = _strike_belief(_walled_base_prior(), (1, 3), team_bombs=6)
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
     assert strike(b, danger, p, StrategyParams()) == 5            # PLACE_BOMB
@@ -304,13 +386,16 @@ def test_strike_does_not_breach_with_only_one_bomb():
 def test_strike_skips_breach_when_an_ally_bomb_already_opens_the_wall():
     """An ally bomb already opening the breach wall makes scenario A reach the
     base for free -> scenario B is not strictly faster -> no breach bomb."""
+    from scripted.geometry import PLACE_BOMB as _PLACE_BOMB_ACT
     b = _strike_belief(_walled_base_prior(), (1, 3), team_bombs=3)
     b.ally_bombs = {(2, 3): 2}                 # blast opens (2,3)|(3,3) at tick 2
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
-    # Scenario A already reaches the base via the ally-opened wall, so strike
-    # navigates with a move instead of breaching.
-    assert strike(b, danger, p, StrategyParams()) in (0, 1, 2, 3)
+    # Scenario A already reaches the base via the ally-opened wall — strike
+    # navigates (or briefly STAYs to let the wall open AFTER detonate) instead
+    # of breaching with its own bomb.
+    action = strike(b, danger, p, StrategyParams())
+    assert action != _PLACE_BOMB_ACT
 
 
 # --- effective HP ----------------------------------------------------------
@@ -398,44 +483,54 @@ def test_target_base_skips_a_doomed_base():
     assert base == (5, 5)                  # the doomed base is skipped
 
 
-# --- strike: two-phase soften / one-shot -----------------------------------
+# --- strike: bomb-while-our-damage-still-lands ------------------------------
 
-def test_strike_phase_a_softens_with_a_single_bomb():
-    """A near-full base (effective_hp > soften_floor) is bombed with any bomb
-    in hand — no commitment gate."""
-    b = _strike_belief(_base_prior(), (3, 5), team_bombs=1)   # 2 tiles from base
-    # no enemy_base_health record -> assumed full (100 HP) -> Phase A
+def test_strike_bombs_when_own_damage_still_lands():
+    """A near-full base, single bomb in hand, no in-flight bombs of ours —
+    own_hits * 20 = 0 < 100 → bomb."""
+    b = _strike_belief(_base_prior(), (3, 5), team_bombs=1)
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
-    assert strike(b, danger, p, StrategyParams()) == 5        # PLACE_BOMB
+    assert strike(b, danger, p, StrategyParams()) == 5
 
 
-def test_strike_phase_b_gate_yields_when_under_stocked():
-    """A crippled base (effective_hp <= soften_floor) is not struck without
-    the full kill in hand — strike yields."""
-    b = _strike_belief(_base_prior(), (3, 5), team_bombs=2)
-    b.enemy_base_health = {(3, 3): 0.6}      # 60 HP -> needs 3 bombs
-    danger = DangerMap({}, b)
-    p = build_planner(b, danger)
-    assert strike(b, danger, p, StrategyParams()) is None     # gated
-
-
-def test_strike_phase_b_commits_with_the_full_kill():
-    """Same crippled base, but the agent now holds the full 3 bombs."""
+def test_strike_bombs_a_partly_softened_base_while_own_damage_still_lands():
+    """HP=60, no in-flight own bombs (someone else softened) — 0 < 60 → bomb."""
     b = _strike_belief(_base_prior(), (3, 5), team_bombs=3)
     b.enemy_base_health = {(3, 3): 0.6}
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
-    assert strike(b, danger, p, StrategyParams()) == 5        # PLACE_BOMB
+    assert strike(b, danger, p, StrategyParams()) == 5
 
 
-def test_strike_phase_b_one_bomb_base_is_never_gated():
-    """A base needing only one bomb is struck immediately."""
-    b = _strike_belief(_base_prior(), (3, 5), team_bombs=1)
-    b.enemy_base_health = {(3, 3): 0.2}      # 20 HP -> needs 1 bomb
+def test_strike_yields_when_own_in_flight_already_finishes():
+    """HP=40 but two own in-flight bombs hit this base — 40 ≤ 40 → yield."""
+    b = _strike_belief(_base_prior(), (3, 5), team_bombs=3)
+    b.enemy_base_health = {(3, 3): 0.4}            # 40 HP observed
+    # Two of our in-flight bombs reach (3, 3) — 40 in-flight damage covers it.
+    b.own_bombs = [((3, 3), 4), ((3, 3), 3)]
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
-    assert strike(b, danger, p, StrategyParams()) == 5        # PLACE_BOMB
+    assert strike(b, danger, p, StrategyParams()) is None
+
+
+def test_strike_keeps_bombing_when_own_damage_only_partially_covers():
+    """HP=60, one own in-flight bomb (= 20 damage). 20 < 60 → still bomb."""
+    b = _strike_belief(_base_prior(), (3, 5), team_bombs=2)
+    b.enemy_base_health = {(3, 3): 0.6}
+    b.own_bombs = [((3, 3), 3)]                    # one own in-flight hits
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert strike(b, danger, p, StrategyParams()) == 5
+
+
+def test_strike_bombs_a_low_hp_base_with_a_single_bomb():
+    """HP=20, 1 bomb, no in-flight — 0 < 20 → bomb."""
+    b = _strike_belief(_base_prior(), (3, 5), team_bombs=1)
+    b.enemy_base_health = {(3, 3): 0.2}
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert strike(b, danger, p, StrategyParams()) == 5
 
 
 # --- sweep leash & default target ------------------------------------------

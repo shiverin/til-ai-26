@@ -11,9 +11,9 @@ from policy import SymbolicTransformerActor, NUM_ACTIONS, NUM_TOKENS
 
 
 def _dummy(n=3):
-    return (torch.zeros(n, 17, 16, 16), torch.zeros(n, 5, 11),
+    return (torch.zeros(n, 85, 16, 16), torch.zeros(n, 5, 11),
             torch.zeros(n, 7, 5, 25), torch.zeros(n, 7, 7, 25),
-            torch.zeros(n, 10))
+            torch.zeros(n, 50))
 
 
 def test_forward_accepts_five_tensors_returns_logits():
@@ -69,3 +69,7 @@ def test_policy_dims_match_feature_contract():
     assert P.NUM_RAW_AGENT == Fe.RAW_AGENT_SHAPE[0] * Fe.RAW_AGENT_SHAPE[1]
     assert P.NUM_RAW_BASE == Fe.RAW_BASE_SHAPE[0] * Fe.RAW_BASE_SHAPE[1]
     assert P.NUM_TOKENS == 347
+    # frame-stack contract agreement
+    assert P.STACK == Fe.STACK
+    assert P.STACKED_GRID_CHANNELS == Fe.STACKED_GRID_CHANNELS
+    assert P.STACKED_SCALARS == Fe.STACKED_SCALARS

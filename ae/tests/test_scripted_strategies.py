@@ -3,7 +3,7 @@ from scripted.strategies import StrategyParams
 
 def test_strategy_params_defaults():
     p = StrategyParams()
-    assert p.breach_min_bombs == 2
+    assert p.breach_min_bombs == 5
     assert p.sweep_base_gradient == 0.5
     assert p.forage_requires_endgame is True
     assert p.camp_leash is None
@@ -72,7 +72,8 @@ def test_registry_has_all_strategies():
     from scripted.strategies import STRATEGIES
     assert set(STRATEGIES) == {
         "balanced", "balanced_extreme", "base_rusher", "base_rusher_extreme",
-        "collector", "camper", "forager", "lean_rush", "defender",
+        "collector", "camper", "forager", "lean_rush", "defender", "adaptive",
+        "balanced_extreme_opening",
     }
     for name, s in STRATEGIES.items():
         assert s.name == name
@@ -140,3 +141,42 @@ def test_defender_strategy_is_registered():
     s = STRATEGIES["defender"]
     assert s.name == "defender"
     assert s.layers == (survive, defend_intercept, forage_loop, sweep, hold)
+
+
+def test_strategyparams_has_trap_enabled_knob():
+    from scripted.strategies import StrategyParams
+    p = StrategyParams()
+    assert p.trap_enabled is True
+
+
+def test_adaptive_strategy_is_registered():
+    from scripted.strategies import STRATEGIES
+    from scripted.adaptive_layers import forage_loop, rush_roi, trap
+    from scripted.layers import default, survive, sweep
+    s = STRATEGIES["adaptive"]
+    assert s.name == "adaptive"
+    assert s.layers == (survive, rush_roi, trap, forage_loop, sweep, default)
+
+
+def test_strategyparams_has_stuck_knobs():
+    from scripted.strategies import StrategyParams
+    p = StrategyParams()
+    assert p.stuck_trigger_ticks == 2
+    assert p.stuck_blacklist_ttl == 10
+
+
+def test_balanced_extreme_has_body_block_gate():
+    from scripted.strategies import STRATEGIES
+    from scripted.gates import body_block_resolve
+    s = STRATEGIES["balanced_extreme"]
+    assert body_block_resolve in s.gates
+
+
+def test_balanced_extreme_opening_has_body_block_gate():
+    from scripted.strategies import STRATEGIES
+    from scripted.gates import body_block_resolve, scripted_opening
+    s = STRATEGIES["balanced_extreme_opening"]
+    assert body_block_resolve in s.gates
+    assert scripted_opening in s.gates
+    # scripted_opening MUST run last so the opening book wins ticks 0-5.
+    assert s.gates.index(body_block_resolve) < s.gates.index(scripted_opening)

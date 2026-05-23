@@ -127,33 +127,50 @@ def test_hunt_none_when_enemy_out_of_blast_range():
     assert _hunt(b) is None
 
 
-def test_hunt_single_enemy_needs_two_bombs():
-    # exactly one enemy in range; only 1 bomb -> reserve it, do not place
+def test_hunt_endgame_single_enemy_places_with_one_bomb():
+    # No live bases (= endgame in this fixture). One enemy in range. The
+    # bomb-floor only applies while bases are alive, so hunt fires on its
+    # last bomb.
     b = _open_belief(loc=(3, 3), team_bombs=1, enemies={(3, 4)})
-    assert _hunt(b) is None
+    assert _hunt(b) == PLACE_BOMB
 
 
-def test_hunt_single_enemy_places_with_two_bombs():
+def test_hunt_endgame_single_enemy_places_with_two_bombs():
     b = _open_belief(loc=(3, 3), team_bombs=2, enemies={(3, 4)})
     assert _hunt(b) == PLACE_BOMB
 
 
-def test_hunt_two_enemies_places_with_one_bomb():
-    # two enemies both in blast range -> spend even the last bomb
+def test_hunt_endgame_two_enemies_places_with_one_bomb():
+    # No live bases, two enemies in range — hunt fires.
     b = _open_belief(loc=(3, 3), team_bombs=1, enemies={(3, 4), (2, 3)})
     assert _hunt(b) == PLACE_BOMB
 
 
-def test_hunt_two_enemies_places_with_two_bombs():
+def test_hunt_endgame_two_enemies_places_with_two_bombs():
     b = _open_belief(loc=(3, 3), team_bombs=2, enemies={(3, 4), (2, 3)})
     assert _hunt(b) == PLACE_BOMB
 
 
-def test_hunt_counts_only_in_range_enemies():
-    # one enemy in range, one far away -> a single in-range hit, so 1 bomb
-    # is not enough
+def test_hunt_endgame_fires_with_any_in_range_hit():
+    # One enemy in range, one far away. `hits == 1` is enough — endgame
+    # has no bomb floor, so hunt fires with 1 bomb on 1 in-range enemy.
     b = _open_belief(loc=(3, 3), team_bombs=1, enemies={(3, 4), (3, 6)})
+    assert _hunt(b) == PLACE_BOMB
+
+
+def test_hunt_holds_fire_below_bomb_floor_with_live_bases():
+    # A live enemy base + bombs below the floor -> hunt yields even with an
+    # enemy in range, saving the stockpile for the +50 base kill.
+    b = _open_belief(loc=(3, 3), team_bombs=5, enemies={(3, 4)})
+    b.prior.enemy_bases = [(0, 0)]                     # one live base
     assert _hunt(b) is None
+
+
+def test_hunt_fires_at_bomb_floor_with_live_bases():
+    # Same setup but team_bombs hits the floor (default 6) -> fire.
+    b = _open_belief(loc=(3, 3), team_bombs=6, enemies={(3, 4)})
+    b.prior.enemy_bases = [(0, 0)]
+    assert _hunt(b) == PLACE_BOMB
 
 
 def test_hunt_ignores_enemy_behind_wall():
@@ -200,9 +217,20 @@ def test_hunt_counts_only_live_enemies():
     assert _hunt(b) == PLACE_BOMB
 
 
-def test_hunt_frozen_enemy_does_not_reach_two_count():
-    # Two enemies in range, one frozen -> only 1 live; with team_bombs == 1
-    # a single live enemy is NOT enough (needs >= 2 bombs or >= 2 enemies).
+def test_hunt_frozen_enemy_does_not_count_as_hit():
+    # Two enemies in range, one frozen -> only 1 live counts. With a LIVE base
+    # and 1 bomb (below the floor), hunt yields. Frozen enemies aren't a hunt
+    # target.
     b = _open_belief(loc=(3, 3), team_bombs=1, enemies={(3, 4), (2, 3)})
     b.frozen_enemies = {(2, 3)}
+    b.prior.enemy_bases = [(0, 0)]
     assert _hunt(b) is None
+
+
+def test_hunt_endgame_frozen_enemy_yields_when_no_live_hit():
+    # Endgame: one live enemy in range. Frozen enemies on adjacent tiles do
+    # not contribute to the hit count, but the lone live enemy still triggers
+    # hunt (floor doesn't apply when bases are dead).
+    b = _open_belief(loc=(3, 3), team_bombs=1, enemies={(3, 4), (2, 3)})
+    b.frozen_enemies = {(2, 3)}
+    assert _hunt(b) == PLACE_BOMB

@@ -1,5 +1,6 @@
 """Tests for the balanced-family winner collection tool."""
 from collect_family_winner import passes_gate
+from features import STACKED_GRID_CHANNELS, STACKED_SCALARS
 
 
 def _outcome(strategy, value, margin):
@@ -63,11 +64,11 @@ def test_build_winner_samples_yields_one_per_step_with_correct_shapes():
     samples = build_winner_samples(winner_steps)
     assert len(samples) == len(winner_steps)
     s = samples[0]
-    assert s.grid.shape == (17, 16, 16)
+    assert s.grid.shape == (STACKED_GRID_CHANNELS, 16, 16)
     assert s.base_feats.shape == (5, 11)
     assert s.raw_agent.shape == (7, 5, 25)
     assert s.raw_base.shape == (7, 7, 25)
-    assert s.scalar.shape == (10,)
+    assert s.scalar.shape == (STACKED_SCALARS,)
     assert s.mask.shape == (6,) and s.mask.dtype == bool
     assert isinstance(s.action, int)
 
@@ -100,11 +101,11 @@ def test_collect_smoke(tmp_path):
 
     if samples:
         s = samples[0]
-        assert s.grid.shape == (17, 16, 16)
+        assert s.grid.shape == (STACKED_GRID_CHANNELS, 16, 16)
         assert s.base_feats.shape == (5, 11)
         assert s.raw_agent.shape == (7, 5, 25)
         assert s.raw_base.shape == (7, 7, 25)
-        assert s.scalar.shape == (10,)
+        assert s.scalar.shape == (STACKED_SCALARS,)
 
     path = tmp_path / "family_winner.pt"
     torch.save({"samples": samples, "episodes": episodes, "meta": meta},

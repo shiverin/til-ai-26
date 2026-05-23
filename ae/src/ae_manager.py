@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 
+from scripted import greedy
 from scripted.belief import Belief, _scalar
 from scripted.decide import act
 from scripted.strategies import STRATEGIES
@@ -13,6 +14,8 @@ from scripted.map_prior import MapPrior
 class AEManager:
     """Serves the scripted AE agent. One instance per server process."""
 
+    GREEDY = "greedy"
+
     def __init__(self):
         self.prior = MapPrior.load()
         self.belief = Belief()
@@ -20,11 +23,15 @@ class AEManager:
         # Which scripted strategy to serve; set per-image via the AE_STRATEGY
         # env var (Docker build-arg). Defaults to the qualifier agent.
         name = os.environ.get("AE_STRATEGY", "balanced")
-        if name not in STRATEGIES:
+        self._greedy = name == self.GREEDY
+        if self._greedy:
+            self.strategy = None
+        elif name in STRATEGIES:
+            self.strategy = STRATEGIES[name]
+        else:
             raise ValueError(
                 f"AE_STRATEGY={name!r} is not a known strategy; "
-                f"choose one of {sorted(STRATEGIES)}")
-        self.strategy = STRATEGIES[name]
+                f"choose one of {sorted(list(STRATEGIES) + [self.GREEDY])}")
 
     def ae(self, observation: dict) -> int:
         """Return the next action for the agent.
@@ -45,6 +52,8 @@ class AEManager:
             self._episode_started = True
 
         self.belief.update(observation)
+        if self._greedy:
+            return greedy.act(self.belief, observation["action_mask"])
         return act(self.belief, observation["action_mask"], self.strategy)
 
 

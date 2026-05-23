@@ -7,17 +7,17 @@ from policy import SymbolicTransformerActor
 from critic import CentralizedCritic
 from train_selfplay import RolloutBuffer
 from critic import STATE_PLANES, STATE_SCALARS
-from features import GRID_CHANNELS, NUM_BASES, BASE_FIELDS, RAW_AGENT_SHAPE, RAW_BASE_SHAPE, FEATURE_SCALARS
+from features import STACKED_GRID_CHANNELS, STACKED_SCALARS, NUM_BASES, BASE_FIELDS, RAW_AGENT_SHAPE, RAW_BASE_SHAPE
 
 
 def _toy_buffer(n=128):
     rng = np.random.default_rng(0)
     return RolloutBuffer(
-        grid=rng.random((n, GRID_CHANNELS, 16, 16)).astype(np.float32),
+        grid=rng.random((n, STACKED_GRID_CHANNELS, 16, 16)).astype(np.float32),
         base_feats=rng.random((n, NUM_BASES, BASE_FIELDS)).astype(np.float32),
         raw_agent=rng.random((n, *RAW_AGENT_SHAPE)).astype(np.float32),
         raw_base=rng.random((n, *RAW_BASE_SHAPE)).astype(np.float32),
-        scalar=rng.random((n, FEATURE_SCALARS)).astype(np.float32),
+        scalar=rng.random((n, STACKED_SCALARS)).astype(np.float32),
         gstate=rng.random((n, STATE_PLANES, 16, 16)).astype(np.float32),
         gscalar=rng.random((n, STATE_SCALARS)).astype(np.float32),
         actions=rng.integers(0, 6, n).astype(np.int64),

@@ -51,7 +51,7 @@ def test_update_marks_visible_collectibles():
     obs = {"agent_viewcone": vc, "direction": 0, "location": list(cc),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert cc in b.collected
@@ -87,7 +87,7 @@ def test_update_records_destroyed_wall():
     obs = {"agent_viewcone": vc, "direction": 0, "location": list(a),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert frozenset({a, c}) in b.destroyed_walls
@@ -122,12 +122,15 @@ def test_ally_and_enemy_bombs_tracked_separately():
     obs = {"agent_viewcone": vc, "direction": 0, "location": list(loc),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
-    assert b.enemy_bombs.get((6, 5)) == 2     # enemy bomb -> danger model
+    # Belief stores `env_timer + 1` (lethal phase from the planner's POV —
+    # detonation happens in the step AFTER our move). Viewcone timers 2 and 3
+    # become stored 3 and 4 respectively.
+    assert b.enemy_bombs.get((6, 5)) == 3     # enemy bomb -> danger model
     assert (5, 5) not in b.enemy_bombs        # our own bomb -> NOT in danger model
-    assert b.ally_bombs.get((5, 5)) == 3      # our own bomb -> tracked separately
+    assert b.ally_bombs.get((5, 5)) == 4      # our own bomb -> tracked separately
 
 
 def test_ally_bomb_detonation_opens_walls():
@@ -145,7 +148,7 @@ def test_ally_bomb_detonation_opens_walls():
     obs = {"agent_viewcone": vc, "direction": 0, "location": list(bomb_cell),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert bomb_cell not in b.ally_bombs      # bomb consumed
@@ -162,7 +165,7 @@ def _base_obs(loc, step, enemy_base_present):
     return {"agent_viewcone": vc, "direction": 0, "location": list(loc),
             "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
             "base_location": [0, 0],
-            "team_bombs": 3, "step": step, "frozen_ticks": 0,
+            "team_bombs": 3, "team_resources": 0.0, "step": step, "frozen_ticks": 0,
             "health": [60.0], "base_health": [100.0]}
 
 
@@ -206,7 +209,7 @@ def _enemy_obs(loc, enemy_health):
     return {"agent_viewcone": vc, "direction": 0, "location": list(loc),
             "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
             "base_location": [0, 0],
-            "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+            "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
             "health": [60.0], "base_health": [100.0]}
 
 
@@ -270,7 +273,7 @@ def _dual_obs(agent_loc, base_loc, base_vc, base_health=100.0):
             "base_viewcone": base_vc,
             "direction": 0, "location": list(agent_loc),
             "base_location": list(base_loc),
-            "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+            "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
             "health": [60.0], "base_health": [base_health]}
 
 
@@ -299,7 +302,8 @@ def test_base_viewcone_records_enemy_bomb_near_home():
     base_vc[4, 3, 18] = 1.0      # ENEMY_BOMB
     base_vc[4, 3, 20] = 2.0      # ENEMY_BOMB_TIMER
     b.update(_dual_obs((0, 0), (8, 8), base_vc))
-    assert b.enemy_bombs.get((9, 8)) == 2
+    # Stored timer = viewcone_timer + 1 (lethal-phase shift).
+    assert b.enemy_bombs.get((9, 8)) == 3
 
 
 def test_base_viewcone_centre_cell_maps_to_the_base_tile():
@@ -332,7 +336,7 @@ def test_base_and_agent_viewcones_fold_idempotently():
     base_vc[4, 3, 22] = 1.0
     obs = {"agent_viewcone": agent_vc, "base_viewcone": base_vc,
            "direction": 0, "location": [8, 8], "base_location": [8, 8],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert b.enemies == {(9, 8)}     # exactly one entry, no duplication
@@ -372,9 +376,13 @@ def test_record_own_bomb_appends_at_location():
     b.reset(m)
     b.location = (5, 5)
     b.record_own_bomb()
-    assert b.own_bombs == [((5, 5), BOMB_TIMER)]
+    # Initial timer = BOMB_TIMER + 1: the bomb is placed at action 1 of the
+    # current obs (planner phase 1), so it detonates at phase 1 + BOMB_TIMER.
+    # The next belief.update decrements once, landing on BOMB_TIMER — matching
+    # the viewcone-sourced bomb's lethal-phase semantics.
+    assert b.own_bombs == [((5, 5), BOMB_TIMER + 1)]
     b.record_own_bomb()                      # a stack: two entries on one tile
-    assert b.own_bombs == [((5, 5), BOMB_TIMER), ((5, 5), BOMB_TIMER)]
+    assert b.own_bombs == [((5, 5), BOMB_TIMER + 1), ((5, 5), BOMB_TIMER + 1)]
 
 
 def test_own_bombs_decrement_and_expire_on_update():
@@ -385,7 +393,7 @@ def test_own_bombs_decrement_and_expire_on_update():
     obs = {"agent_viewcone": np.zeros((7, 5, 25), dtype=np.float32),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0], "direction": 0, "location": [3, 3],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert b.own_bombs == [((3, 3), 1)]      # (4,4) timer 1 -> 0 -> dropped
@@ -420,7 +428,7 @@ def test_realised_yield_credits_a_tile_the_agent_collected():
     obs = {"agent_viewcone": vc, "direction": 0, "location": list(cc),
            "base_viewcone": np.zeros((7, 7, 25), dtype=np.float32),
            "base_location": [0, 0],
-           "team_bombs": 3, "step": 5, "frozen_ticks": 0,
+           "team_bombs": 3, "team_resources": 0.0, "step": 5, "frozen_ticks": 0,
            "health": [60.0], "base_health": [100.0]}
     b.update(obs)
     assert cc in b.collected

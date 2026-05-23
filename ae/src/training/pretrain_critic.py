@@ -16,13 +16,18 @@ import argparse
 import os
 import sys
 
+# Must precede `import torch` — the CUDA caching allocator reads this once at
+# import time. `expandable_segments:True` mitigates fragmentation for the
+# variable-batch critic-pretrain loop.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from critic import CentralizedCritic
 

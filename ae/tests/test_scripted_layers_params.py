@@ -51,5 +51,5 @@ def test_strategy_params_survive_defaults():
     p = StrategyParams()
     assert p.openness_radius == 4
     assert p.openness_weight == 1.5
-    assert p.bomb_drop_min == 2
+    assert p.bomb_drop_min == 5
     assert p.bomb_drop_buffer == 1

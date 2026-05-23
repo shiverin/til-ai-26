@@ -1,17 +1,16 @@
 """Opponent-pool manager for the self-play ladder.
 
 Holds two kinds of opponents:
-  - 6 PERMANENT scripted-strategy anchors (never evicted) — guarantee the
-    learner cannot forget how to beat the scripted roster.
+  - PERMANENT scripted-strategy anchors (never evicted) — one per registered
+    strategy in scripted.strategies.STRATEGIES; guarantees the learner cannot
+    forget how to beat any scripted opponent.
   - frozen learner CHECKPOINTS, capped at max_checkpoints (oldest evicted).
 
 Tracks per-member win-rate bookkeeping for PFSP sampling (Task 12).
 """
 from dataclasses import dataclass, field
 
-SCRIPTED_STRATEGIES = ("balanced", "balanced_extreme", "base_rusher",
-                       "base_rusher_extreme", "collector", "camper")
-
+from scripted.strategies import STRATEGIES
 
 @dataclass(eq=False)
 class Member:
@@ -39,7 +38,7 @@ class League:
         self.max_checkpoints = max_checkpoints
         self._anchors = [
             Member(name=f"scripted:{s}", kind="scripted", ref=s)
-            for s in SCRIPTED_STRATEGIES
+            for s in STRATEGIES
         ]
         self._checkpoints = []
 

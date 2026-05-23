@@ -16,17 +16,18 @@ import torch
 # ae/src holds policy.py; conftest.py adds it for tests but a standalone run
 # (CLI or `uv run python -c ...`) needs this.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
-from policy import SymbolicTransformerActor
+from policy import SymbolicTransformerActor, STACKED_GRID_CHANNELS, STACKED_SCALARS
 
 _INPUT_NAMES = ["grid", "base_feats", "raw_agent", "raw_base", "scalar"]
 
 
 def _dummy_inputs():
-    return (torch.zeros(1, 17, 16, 16), torch.zeros(1, 5, 11),
+    return (torch.zeros(1, STACKED_GRID_CHANNELS, 16, 16),
+            torch.zeros(1, 5, 11),
             torch.zeros(1, 7, 5, 25), torch.zeros(1, 7, 7, 25),
-            torch.zeros(1, 10))
+            torch.zeros(1, STACKED_SCALARS))
 
 
 def export_actor(actor, out_path):
@@ -55,7 +56,7 @@ def export_transformer(pt_path, onnx_path):
 
 def main():
     """CLI: export ae/src/policy_transformer_bc.pt -> ae/src/policy.onnx."""
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     pt_path = os.path.join(src, "policy_transformer_bc.pt")
     onnx_path = os.path.join(src, "policy.onnx")
     export_transformer(pt_path, onnx_path)

@@ -28,11 +28,12 @@ from til_environment.config import default_config
 
 SLOTS = ["agent_0", "agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]
 
-# The eight named scripted strategies. test_strategy_names_match_registry
-# asserts this stays in sync with scripted.strategies.STRATEGIES.
+# The named scripted strategies. test_strategy_names_match_registry asserts
+# this stays in sync with scripted.strategies.STRATEGIES.
 STRATEGY_NAMES = ["balanced", "balanced_extreme", "base_rusher",
                   "base_rusher_extreme", "collector", "camper", "forager",
-                  "lean_rush", "defender"]
+                  "lean_rush", "defender", "adaptive",
+                  "balanced_extreme_opening"]
 
 
 def assign_roster(episode_seed):

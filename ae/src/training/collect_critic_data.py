@@ -18,12 +18,15 @@ import os
 import sys
 import time
 
+# Must precede `import torch`.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 
 # ae/src holds scripted/, policy.py — needed before importing train_selfplay's
 # dependencies (it adds the path itself, but league/policy imports here race it).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from league import League
 from policy import SymbolicTransformerActor
@@ -49,7 +52,7 @@ def main():
     args = parser.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
-    actor_path = os.path.join(here, "..", "src", args.actor)
+    actor_path = os.path.join(here, "..", args.actor)
     actor = SymbolicTransformerActor.from_checkpoint(actor_path)
     actor.eval()   # frozen — never updated; CPU-resident for the fork workers
     print(f"frozen actor loaded from {actor_path}")

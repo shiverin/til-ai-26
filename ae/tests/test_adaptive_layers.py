@@ -1,4 +1,6 @@
 """Tests for the adaptive cascade layers (ae/src/scripted/adaptive_layers.py)."""
+from dataclasses import replace
+
 from scripted import adaptive_layers
 from scripted.belief import Belief
 from scripted.danger import DangerMap
@@ -400,3 +402,69 @@ def test_defend_intercept_yields_when_foraging_out_earns_it(monkeypatch):
                           "resource_leaning": False}])
     b, danger, planner, params = _defend_ctx((0, 4), 0, (4, 4), (4, 5), 100.0, 3)
     assert defend_intercept(b, danger, planner, params) is None
+
+
+from scripted.adaptive_layers import trap
+
+
+def _trap_ctx(loc, facing, enemy, team_bombs, grid_size=5, enemy_bombs=None,
+              ally_bombs=None):
+    """A (belief, danger, planner, params) context with one visible enemy."""
+    b = Belief()
+    b.prior = _Prior(grid_size)
+    b.location, b.facing, b.step = loc, facing, 0
+    b.team_bombs = team_bombs
+    b.enemies = {enemy}
+    if enemy_bombs:
+        b.enemy_bombs = dict(enemy_bombs)
+    if ally_bombs:
+        b.ally_bombs = dict(ally_bombs)
+    danger = DangerMap({}, b)
+    planner = build_planner(b, danger)
+    return b, danger, planner, StrategyParams()
+
+
+def test_trap_fires_when_pair_is_in_killboxes(monkeypatch):
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES",
+                        frozenset({((1, 3), (1, 1))}))
+    b, danger, planner, params = _trap_ctx((1, 3), 0, (1, 1), 1)
+    assert trap(b, danger, planner, params) == _PLACE_BOMB
+
+
+def test_trap_yields_when_pair_not_in_killboxes(monkeypatch):
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES", frozenset())
+    b, danger, planner, params = _trap_ctx((1, 3), 0, (1, 1), 1)
+    assert trap(b, danger, planner, params) is None
+
+
+def test_trap_yields_when_disabled(monkeypatch):
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES",
+                        frozenset({((1, 3), (1, 1))}))
+    b, danger, planner, params = _trap_ctx((1, 3), 0, (1, 1), 1)
+    params = replace(params, trap_enabled=False)
+    assert trap(b, danger, planner, params) is None
+
+
+def test_trap_yields_with_no_bombs(monkeypatch):
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES",
+                        frozenset({((1, 3), (1, 1))}))
+    b, danger, planner, params = _trap_ctx((1, 3), 0, (1, 1), 0)
+    assert trap(b, danger, planner, params) is None
+
+
+def test_trap_yields_when_enemy_bomb_observed(monkeypatch):
+    # Any enemy bomb on the board could open a destructible wall and break
+    # the offline-computed killbox; the layer self-disables for safety.
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES",
+                        frozenset({((1, 3), (1, 1))}))
+    b, danger, planner, params = _trap_ctx(
+        (1, 3), 0, (1, 1), 1, enemy_bombs={(0, 0): 3})
+    assert trap(b, danger, planner, params) is None
+
+
+def test_trap_yields_when_ally_bomb_observed(monkeypatch):
+    monkeypatch.setattr("scripted.adaptive_layers.KILLBOXES",
+                        frozenset({((1, 3), (1, 1))}))
+    b, danger, planner, params = _trap_ctx(
+        (1, 3), 0, (1, 1), 1, ally_bombs={(2, 2): 2})
+    assert trap(b, danger, planner, params) is None

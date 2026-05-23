@@ -23,6 +23,8 @@ CH = {
     "TILE_EMPTY": 5, "TILE_RECON": 6, "TILE_MISSION": 7, "TILE_RESOURCE": 8,
     "ENEMY_AGENT": 10, "ENEMY_AGENT_HEALTH": 22,
     "ENEMY_BASE": 12, "ENEMY_BASE_HEALTH": 24,
+    "DESTR_WALL_RIGHT": 13, "DESTR_WALL_DOWN": 14,
+    "DESTR_WALL_LEFT": 15, "DESTR_WALL_UP": 16,
     "ALLY_BOMB": 17, "ENEMY_BOMB": 18,
     "ALLY_BOMB_TIMER": 19, "ENEMY_BOMB_TIMER": 20,
 }
@@ -33,6 +35,17 @@ VC_BEHIND, VC_LEFT = 2, 2
 def _scalar(x):
     """Extract an int from a scalar / length-1 list / tuple / array."""
     return int(np.asarray(x).flat[0])
+
+
+def _trace_decision(belief, layer, key, value=None):
+    """Append a cascade-decision trace entry when belief.trace_decisions is on.
+
+    Layers call this at every gating conditional so the operator can replay
+    exactly which branches fired (and which yielded) each tick.
+    """
+    if getattr(belief, "trace_decisions", False):
+        belief.decision_log.append(
+            (belief.step, layer, key, value))
 
 
 class Belief:
@@ -53,6 +66,7 @@ class Belief:
         self.location = None
         self.facing = 0
         self.team_bombs = 0
+        self.team_resources = 0.0       # accumulated resource ratio for our team
         self.step = 0
         self.frozen_ticks = 0
         self.health = 0.0
@@ -61,11 +75,40 @@ class Belief:
         # last fired ("survive", "sweep", "first_legal", …). Read by
         # the visualizer overlay; never affects behaviour.
         self.last_layer = None
+        # Stuck-detection: where we *expected* to be after the last act(), and
+        # how many consecutive ticks an intended move has failed. Set by
+        # decide.act and read by Belief.update on the following observation.
+        self.expected_location = None
+        self.stuck_ticks = 0
+        # tile -> expiry_step; planner treats these as high-cost obstacles.
+        self.stuck_blacklist = {}
         # Per-episode scratch state for the adaptive cascade layers (Plan 2+).
         self.adaptive_state = {}
         # (step, value) of collectibles the agent itself has collected; the
         # realised forage yield-rate is read from a trailing window of this.
         self._yield_window = deque()
+        # The set of world cells the agent's viewcone actually fold-checked
+        # (= cells whose tile-type channel was set, i.e. cells the env LOS
+        # said are visible). Repopulated every `update()`. Read by the
+        # visualizer to draw the true LOS-occluded viewcone rather than the
+        # naive 7×5 rectangle. Includes both agent-viewcone and (when our
+        # base is alive) base-viewcone cells.
+        self.last_visible_cells = set()
+        # Debug trace: every time `_update_walls` marks a wall destroyed,
+        # an entry is appended here. Off by default; enable per-instance via
+        # `belief.trace_wall_destruction = True`. Cleared on reset().
+        self.trace_wall_destruction = False
+        self.wall_destruction_log = []
+        # Debug trace: per-step, every visible cell's wall + destr_wall channel
+        # values. Lets the operator verify what the agent's viewcone reports for
+        # walls along the visibility boundary. Enable via
+        # `belief.trace_observations = True`. Cleared on reset().
+        self.trace_observations = False
+        self.observation_log = []
+        # Debug trace: each cascade-layer conditional appends a `(step, layer,
+        # key, value)` entry. Enable via `belief.trace_decisions = True`.
+        self.trace_decisions = False
+        self.decision_log = []
 
     def reset(self, prior):
         """Start a new episode. `prior` is a team-identified MapPrior."""
@@ -81,8 +124,15 @@ class Belief:
         self.enemy_base_health = {}
         self._enemy_base_set = set(prior.enemy_bases)
         self.last_layer = None
+        self.expected_location = None
+        self.stuck_ticks = 0
+        self.stuck_blacklist = {}
         self.adaptive_state = {}
         self._yield_window = deque()
+        self.last_visible_cells = set()
+        self.wall_destruction_log = []
+        self.observation_log = []
+        self.decision_log = []
 
     def is_wall(self, a, b):
         """True if an (intact) wall separates adjacent tiles a and b."""
@@ -152,6 +202,10 @@ class Belief:
                 if not (0 <= wx < gs and 0 <= wy < gs):
                     continue
                 w = (wx, wy)
+                # Record the LOS-passed visibility for this tick — read by
+                # the visualizer to paint actual-visible (not rectangular)
+                # viewcone shading.
+                self.last_visible_cells.add(w)
 
                 # Collectibles: empty => collected; present => restore.
                 if w in self.prior.collectibles:
@@ -163,13 +217,37 @@ class Belief:
                 # Walls: monotonic — only record disappearances.
                 self._update_walls(w, cell, gs)
 
+                # Debug: capture this visible cell's wall + destr_wall channel
+                # readings so the operator can verify what the viewcone reports
+                # along the visibility boundary.
+                if self.trace_observations:
+                    self.observation_log.append({
+                        "step": self.step,
+                        "agent_loc": self.location,
+                        "agent_facing": self.facing,
+                        "cell": w,
+                        "view_index": (i, j),
+                        "WALL_RIGHT": float(cell[CH["WALL_RIGHT"]]),
+                        "WALL_DOWN": float(cell[CH["WALL_DOWN"]]),
+                        "WALL_LEFT": float(cell[CH["WALL_LEFT"]]),
+                        "WALL_UP": float(cell[CH["WALL_UP"]]),
+                        "DESTR_WALL_RIGHT": float(cell[CH["DESTR_WALL_RIGHT"]]),
+                        "DESTR_WALL_DOWN": float(cell[CH["DESTR_WALL_DOWN"]]),
+                        "DESTR_WALL_LEFT": float(cell[CH["DESTR_WALL_LEFT"]]),
+                        "DESTR_WALL_UP": float(cell[CH["DESTR_WALL_UP"]]),
+                    })
+
                 # Bombs, split by team. Enemy bombs feed the danger model;
                 # ally bombs (our own) are harmless to us but tracked too.
+                # We shift the env's internal countdown by +1 so the stored
+                # `timer` is the planner phase at which the bomb is lethal
+                # (env_timer = 0 at end of upkeep, but DETONATE runs in the
+                # NEXT step after our MOVE, so lethal phase = env_timer + 1).
                 if cell[CH["ALLY_BOMB"]] > 0.5:
-                    t = max(1, int(round(cell[CH["ALLY_BOMB_TIMER"]])))
+                    t = max(1, int(round(cell[CH["ALLY_BOMB_TIMER"]])) + 1)
                     self.ally_bombs[w] = min(self.ally_bombs.get(w, 999), t)
                 if cell[CH["ENEMY_BOMB"]] > 0.5:
-                    t = max(1, int(round(cell[CH["ENEMY_BOMB_TIMER"]])))
+                    t = max(1, int(round(cell[CH["ENEMY_BOMB_TIMER"]])) + 1)
                     self.enemy_bombs[w] = min(self.enemy_bombs.get(w, 999), t)
 
                 # Enemy agents. ENEMY_AGENT_HEALTH is the health ratio; it is
@@ -195,19 +273,44 @@ class Belief:
         """Record a bomb the agent just placed on its current tile. Stacks are
         kept as distinct list entries so effective-HP accounting can count
         them — the cell-keyed `ally_bombs` cannot. Call only after `update()`
-        has set `location` for the tick."""
+        has set `location` for the tick.
+
+        Initial timer = `BOMB_TIMER + 1` because the bomb is placed at action 1
+        of the current obs (= phase 1 in the planner), so it detonates at phase
+        `1 + BOMB_TIMER` from now. The next `belief.update` decrements once,
+        landing on `BOMB_TIMER` — the lethal phase from THAT next obs. Keeps
+        the same `timer = phase-of-detonation-from-current-obs` semantic as
+        the viewcone-sourced enemy/ally bombs."""
         assert self.location is not None, "record_own_bomb before update()"
-        self.own_bombs.append((self.location, BOMB_TIMER))
+        self.own_bombs.append((self.location, BOMB_TIMER + 1))
 
     def update(self, observation):
         """Fold one observation into the belief."""
-        self.location = tuple(int(c) for c in observation["location"])
+        # Stuck-detection: compare incoming location to where we expected to
+        # be. Only counts when we *intended* a move (expected != prior loc);
+        # voluntary STAY/turn/PLACE_BOMB doesn't change stuck_ticks.
+        new_location = tuple(int(c) for c in observation["location"])
+        if self.expected_location is not None and self.location is not None:
+            intended_move = self.expected_location != self.location
+            if intended_move:
+                if new_location == self.expected_location:
+                    self.stuck_ticks = 0      # move succeeded
+                else:
+                    self.stuck_ticks += 1     # move blocked
+        # Evict expired blacklist entries.
+        step_now = int(np.asarray(observation["step"]).flat[0])
+        self.stuck_blacklist = {t: exp for t, exp in self.stuck_blacklist.items()
+                                if exp > step_now}
+        self.location = new_location
         self.facing = int(observation["direction"])
         self.team_bombs = _scalar(observation["team_bombs"])
+        self.team_resources = float(np.asarray(observation["team_resources"]).flat[0])
         self.step = _scalar(observation["step"])
         self.frozen_ticks = _scalar(observation["frozen_ticks"])
         self.health = float(np.asarray(observation["health"]).flat[0])
         self.base_health = float(np.asarray(observation["base_health"]).flat[0])
+        # Reset the visible-cells set; the viewcone fold below repopulates.
+        self.last_visible_cells = set()
 
         # Decrement remembered bombs; the viewcone refresh below re-asserts
         # any still visible.
@@ -278,3 +381,19 @@ class Belief:
                 continue
             if cell[CH[ch]] < 0.5:          # prior said wall here; viewcone says none
                 self.destroyed_walls.add(pair)
+                if self.trace_wall_destruction:
+                    destr_ch = "DESTR_" + ch
+                    self.wall_destruction_log.append({
+                        "step": self.step,
+                        "agent_loc": self.location,
+                        "agent_facing": self.facing,
+                        "cell": (wx, wy),
+                        "channel": ch,
+                        "channel_value": float(cell[CH[ch]]),
+                        "destructible_channel_value": (
+                            float(cell[CH[destr_ch]])
+                            if destr_ch in CH else None),
+                        "neighbor": (nx, ny),
+                        "wall_destructible_in_prior":
+                            self.prior.wall_between.get(pair, False),
+                    })

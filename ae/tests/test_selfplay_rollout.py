@@ -4,7 +4,7 @@ import numpy as np
 from train_selfplay import OpponentRegistry, collect_rollout, RolloutBuffer
 from league import League
 from policy import SymbolicTransformerActor
-from features import GRID_CHANNELS
+from features import STACKED_GRID_CHANNELS, STACKED_SCALARS
 
 
 def test_rollout_collects_from_multiple_slots():
@@ -19,12 +19,12 @@ def test_rollout_collects_from_multiple_slots():
     # 3 slots * 200 steps = 600 learner transitions in one episode
     assert buf.size == 3 * 200
     from critic import STATE_PLANES, STATE_SCALARS
-    from features import NUM_BASES, BASE_FIELDS, RAW_AGENT_SHAPE, RAW_BASE_SHAPE, FEATURE_SCALARS
-    assert buf.grid.shape == (buf.size, GRID_CHANNELS, 16, 16)
+    from features import NUM_BASES, BASE_FIELDS, RAW_AGENT_SHAPE, RAW_BASE_SHAPE
+    assert buf.grid.shape == (buf.size, STACKED_GRID_CHANNELS, 16, 16)
     assert buf.base_feats.shape == (buf.size, NUM_BASES, BASE_FIELDS)
     assert buf.raw_agent.shape == (buf.size, *RAW_AGENT_SHAPE)
     assert buf.raw_base.shape == (buf.size, *RAW_BASE_SHAPE)
-    assert buf.scalar.shape == (buf.size, FEATURE_SCALARS)
+    assert buf.scalar.shape == (buf.size, STACKED_SCALARS)
     # encoded global state for the centralized critic, per learner transition
     assert buf.gstate.shape == (buf.size, STATE_PLANES, 16, 16)
     assert buf.gscalar.shape == (buf.size, STATE_SCALARS)
@@ -120,3 +120,20 @@ def test_collect_rollout_parallel_outcomes_per_opponent_slot():
     assert len(outcomes) == 2 * 3
     for member, won in outcomes:
         assert won in (True, False)
+
+
+def test_collect_rollout_uses_kind_mix_when_opponent_members_none():
+    """When opponent_members is None and use_sample_mix=True, opponents are
+    drawn via OpponentRegistry.sample_slot_opponent — verifying the rollout
+    completes and writes one full episode worth of buffer."""
+    from train_selfplay import collect_rollout
+    actor = SymbolicTransformerActor()
+    reg = OpponentRegistry(League())
+    buf = collect_rollout(
+        actor, reg, learner_slots=("agent_0",),
+        num_episodes=1, seed0=42,
+        opponent_members=None,
+        use_sample_mix=True,
+    )
+    assert isinstance(buf, RolloutBuffer)
+    assert buf.size == 200

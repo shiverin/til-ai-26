@@ -10,7 +10,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from bc import bc_gate, collect_dagger_dataset, train_bc
 from policy import SymbolicTransformerActor
@@ -48,7 +48,7 @@ def main():
     print(f"BC GATE {'PASS' if passed else 'FAIL'}: {detail}", flush=True)
 
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "..", "src", "policy_bc.pt")
+                       "..", "policy_bc.pt")
     actor.save_checkpoint(out)
     print(f"saved {out}  [total {time.time() - t0:.0f}s]", flush=True)
 

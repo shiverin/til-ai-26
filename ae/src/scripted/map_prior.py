@@ -26,6 +26,11 @@ class MapPrior:
         self.team = None
         self.our_base = None
         self.enemy_bases = []
+        # Resource-kind collectible cells (populated by MapPrior.load).
+        # `None` means "kind info unavailable" — consumers (e.g. sweep) fall
+        # back to all collectibles in that case, keeping hand-rolled priors
+        # in tests working.
+        self.resource_cells = None
 
     @classmethod
     def load(cls, path=_DEFAULT_PATH):
@@ -37,9 +42,14 @@ class MapPrior:
         spawns = {int(t): {"pos": tuple(s["pos"]), "facing": int(s["facing"])}
                   for t, s in data["spawns"].items()}
         collectibles = {}
+        resource_cells = set()
         for x, y, kind in data["collectibles"]:
             collectibles[(x, y)] = collectibles.get((x, y), 0.0) + _KIND_VALUE[kind]
-        return cls(int(data["grid_size"]), wall_between, bases, spawns, collectibles)
+            if kind == "resource":
+                resource_cells.add((x, y))
+        instance = cls(int(data["grid_size"]), wall_between, bases, spawns, collectibles)
+        instance.resource_cells = resource_cells
+        return instance
 
     def identify_team(self, base_location):
         """Set self.team / our_base / enemy_bases from the observed base location.

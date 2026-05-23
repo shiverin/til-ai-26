@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 
+from scripted.belief import _trace_decision
 from scripted.blast import bomb_reaches
 from scripted.layers import BASE_MAX_HEALTH, BOMB_ATTACK, _effective_hp
 from scripted.geometry import PLACE_BOMB, chebyshev
@@ -98,31 +99,37 @@ def _follow(belief, planner, loop, state):
 
 
 def forage_loop(belief, danger, planner, params):
-    """Patrol the highest-yield forage loop for the current phase.
+    """Patrol the highest-yield endgame forage loop.
 
-    Phase: while live enemy bases remain (attack phase) the loop is chosen by
-    `yield_attack` — resource tiles fund bombs; in the endgame it is chosen by
-    `yield_endgame`. The agent walks the chosen loop's waypoints via the
-    planner, advancing on arrival. A phase change re-selects the loop. Yields
-    (None) only when no loop exists or none is reachable.
+    Active only once every enemy base is destroyed: picks the loop with the
+    best `yield_endgame` score and walks its waypoints via the planner,
+    advancing on arrival. Yields (None) while any base is alive, when no loop
+    exists, or when none is reachable.
     """
+    live_bases = belief.live_enemy_bases()
+    _trace_decision(belief, "forage_loop", "live_bases_count", len(live_bases))
+    if live_bases:
+        _trace_decision(belief, "forage_loop", "yield_not_endgame", True)
+        return None
     if not LOOPS:
+        _trace_decision(belief, "forage_loop", "yield_no_loops", True)
         return None
     state = belief.adaptive_state
-    attack = bool(belief.live_enemy_bases())
-    yield_key = "yield_attack" if attack else "yield_endgame"
+    yield_key = "yield_endgame"
 
     active = state.get("forage_active_loop")
-    if active is None or state.get("forage_phase") != attack:
+    if active is None:
         active = _best_loop(yield_key)
         state["forage_active_loop"] = active
         state["forage_waypoint_index"] = 0
-        state["forage_switch_step"] = belief.step   # read by loop-switching (Task 4)
-        state["forage_phase"] = attack
+        state["forage_switch_step"] = belief.step
     else:
         active = _maybe_switch(belief, params, active, yield_key, state)
+    _trace_decision(belief, "forage_loop", "active_loop", active)
 
-    return _follow(belief, planner, LOOPS[active], state)
+    action = _follow(belief, planner, LOOPS[active], state)
+    _trace_decision(belief, "forage_loop", "follow_action", action)
+    return action
 
 
 def _hit_tiles(belief, base):
@@ -235,13 +242,17 @@ def rush_roi(belief, danger, planner, params):
     """
     live = [b for b in belief.live_enemy_bases()
             if _effective_hp(belief, b) > 0.0]
+    _trace_decision(belief, "rush_roi", "live_count", len(live))
     state = belief.adaptive_state
     if not live:
+        _trace_decision(belief, "rush_roi", "yield_no_live", True)
         state["rush_target"] = None
         return None
 
     roi = {b: _base_roi(belief, planner, b, params)[0] for b in live}
     best = max(live, key=lambda b: roi[b])
+    _trace_decision(belief, "rush_roi", "best_base", best)
+    _trace_decision(belief, "rush_roi", "best_roi", roi[best])
 
     # Sticky target: keep the committed base unless another beats it by margin.
     prev = state.get("rush_target")
@@ -250,17 +261,23 @@ def rush_roi(belief, danger, planner, params):
         best = prev
 
     if roi[best] <= 0.0:                               # no base is reachable
+        _trace_decision(belief, "rush_roi", "yield_unreachable", True)
         state["rush_target"] = None
         return None
     # ROI gate: attack only when it out-earns foraging. The committed target is
     # kept (not cleared) so the sticky guard still holds on re-entry after a
     # forage interruption — only the immediate action yields.
-    if roi[best] <= _forage_rate(belief, params) * (1.0 + params.roi_gate_margin):
+    forage_rate = _forage_rate(belief, params)
+    _trace_decision(belief, "rush_roi", "forage_rate", forage_rate)
+    if roi[best] <= forage_rate * (1.0 + params.roi_gate_margin):
+        _trace_decision(belief, "rush_roi", "yield_forage_wins", True)
         state["rush_target"] = best
         return None
 
     state["rush_target"] = best
-    return _attack(belief, danger, planner, best)
+    action = _attack(belief, danger, planner, best)
+    _trace_decision(belief, "rush_roi", "attack_action", action)
+    return action
 
 
 def defend_intercept(belief, danger, planner, params):
@@ -307,3 +324,49 @@ def defend_intercept(belief, danger, planner, params):
     if bomb_reaches(belief.location, attacker, belief):
         return PLACE_BOMB
     return planner.first_action(tile)
+
+
+_KILLBOXES_PATH = Path(__file__).resolve().parent.parent / "killboxes.json"
+
+
+def _load_killboxes(path=_KILLBOXES_PATH):
+    """Load the shipped killbox-pair artifact. Returns a frozenset of
+    `(agent_tile, enemy_tile)` (x, y)-tuple pairs."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return frozenset((tuple(a), tuple(e)) for a, e in data["killboxes"])
+
+
+KILLBOXES = _load_killboxes()
+
+
+def trap(belief, danger, planner, params):
+    """Deterministic dead-enemy bomb.
+
+    If any visible live enemy `e` satisfies `(belief.location, e) ∈ KILLBOXES`
+    — an offline-proved configuration where the enemy cannot escape a bomb
+    placed here within the 4-tick fuse — and the runtime safety gates hold,
+    `PLACE_BOMB`. Otherwise yield.
+
+    Safety gates: `trap_enabled` knob must be True; the agent must hold at
+    least one bomb; no enemy OR ally bombs may be observed on the board
+    (since either could open a destructible wall and invalidate the offline
+    escape calculation).
+    """
+    _trace_decision(belief, "trap", "team_bombs", belief.team_bombs)
+    if not params.trap_enabled or belief.team_bombs <= 0:
+        _trace_decision(belief, "trap", "yield_disabled_or_no_bombs", True)
+        return None
+    bombs_on_board = bool(belief.enemy_bombs) or bool(belief.ally_bombs)
+    _trace_decision(belief, "trap", "bombs_on_board", bombs_on_board)
+    if bombs_on_board:
+        _trace_decision(belief, "trap", "yield_bomb_safety", True)
+        return None
+    loc = belief.location
+    enemies = list(belief.live_enemies())
+    _trace_decision(belief, "trap", "live_enemies", enemies)
+    for e in enemies:
+        if (loc, e) in KILLBOXES:
+            _trace_decision(belief, "trap", "killbox_match", (loc, e))
+            return PLACE_BOMB
+    _trace_decision(belief, "trap", "yield_no_killbox_match", True)
+    return None

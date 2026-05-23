@@ -26,8 +26,9 @@ def _scalar(seed=0):
 
 
 def test_scalar_shape_and_range():
-    scalar, _ = _scalar()
-    assert scalar.shape == (F.FEATURE_SCALARS,)
+    scalar_stack, _ = _scalar()
+    assert scalar_stack.shape == (F.STACKED_SCALARS,)
+    scalar = scalar_stack[:F.FEATURE_SCALARS]   # newest frame
     assert (scalar >= 0.0).all() and (scalar <= 1.0).all()
 
 

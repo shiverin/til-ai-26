@@ -12,6 +12,7 @@ and test_feature_contract.py / test_policy_contract.py assert they agree.
 """
 import json
 import math
+from collections import deque
 
 import numpy as np
 
@@ -84,6 +85,12 @@ SC_FACING = 7             # direction / 3
 SC_OWN_BOMBS_IN_FLIGHT = 8  # min(len(own_bombs) / 5, 1)
 SC_LIVE_ENEMY_BASES = 9   # live enemy base count / 5
 
+# --- frame-stack contract (K consecutive observations stacked along the
+# channel/scalar axis) ---
+STACK = 5
+STACKED_GRID_CHANNELS = GRID_CHANNELS * STACK     # 85
+STACKED_SCALARS = FEATURE_SCALARS * STACK         # 50
+
 BOMB_SCALE = 10.0
 MAX_HEALTH = 60.0
 BASE_MAX_HEALTH = 100.0
@@ -111,7 +118,7 @@ class FeatureBuilder:
     _prior_template = None
     _respawn_map = None
 
-    def __init__(self, teacher_strategy="balanced"):
+    def __init__(self, teacher_strategy="balanced_extreme_opening"):
         if FeatureBuilder._prior_template is None:
             FeatureBuilder._prior_template = MapPrior.load(_MAP_PATH)
             FeatureBuilder._respawn_map = np.array(
@@ -127,6 +134,8 @@ class FeatureBuilder:
         self._respawn_left = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.int32)
         # per-tile last-seen step, for belief confidence
         self._last_seen = np.full((GRID_SIZE, GRID_SIZE), -1, dtype=np.int32)
+        self._grid_history = deque(maxlen=STACK)
+        self._scalar_history = deque(maxlen=STACK)
 
     # ------------------------------------------------------------------ #
     def build(self, observation):
@@ -139,6 +148,8 @@ class FeatureBuilder:
             self._started = True
             self._respawn_left[:] = 0
             self._last_seen[:] = -1
+            self._grid_history.clear()
+            self._scalar_history.clear()
 
         prev_collected = set(self.belief.collected)
         self.belief.update(observation)
@@ -161,7 +172,28 @@ class FeatureBuilder:
         base_feats = self._build_base_feats(planner, target)
         raw_agent, raw_base = self._build_raw(observation)
         scalar = self._build_scalar(observation, step)
-        return grid, base_feats, raw_agent, raw_base, scalar
+
+        # Append newest snapshot to the per-slot history.
+        self._grid_history.append(grid)
+        self._scalar_history.append(scalar)
+
+        # Stack newest-first; zero-pad missing past slots before the deque
+        # has filled (warmup).
+        pad_g = STACK - len(self._grid_history)
+        pad_s = STACK - len(self._scalar_history)
+        grid_parts = list(reversed(self._grid_history))
+        if pad_g:
+            grid_parts.append(
+                np.zeros((pad_g * GRID_CHANNELS, GRID_SIZE, GRID_SIZE),
+                         dtype=np.float32))
+        grid_stack = np.concatenate(grid_parts, axis=0)
+
+        scalar_parts = list(reversed(self._scalar_history))
+        if pad_s:
+            scalar_parts.append(
+                np.zeros(pad_s * FEATURE_SCALARS, dtype=np.float32))
+        scalar_stack = np.concatenate(scalar_parts, axis=0)
+        return grid_stack, base_feats, raw_agent, raw_base, scalar_stack
 
     def _build_raw(self, observation):
         """The raw residual branch: viewcones kept whole, no channels stripped.

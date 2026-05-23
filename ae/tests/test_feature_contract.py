@@ -17,6 +17,10 @@ def test_contract_dimensions():
     assert F.FEATURE_SCALARS == 10
     assert F.RAW_AGENT_SHAPE == (7, 5, 25)
     assert F.RAW_BASE_SHAPE == (7, 7, 25)
+    # frame-stack contract
+    assert F.STACK == 5
+    assert F.STACKED_GRID_CHANNELS == 85
+    assert F.STACKED_SCALARS == 50
 
 
 def test_grid_channel_indices_unique_and_dense():

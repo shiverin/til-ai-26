@@ -20,13 +20,13 @@ import torch
 
 # ae/src holds scripted/, imported transitively via evaluate -> features.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from bc import BCSample
 from evaluate import ScriptedAgent
-from features import (BASE_FIELDS, FEATURE_SCALARS, FeatureBuilder,
-                      GRID_CHANNELS, NUM_BASES, RAW_AGENT_SHAPE,
-                      RAW_BASE_SHAPE)
+from features import (BASE_FIELDS, FeatureBuilder,
+                      NUM_BASES, RAW_AGENT_SHAPE, RAW_BASE_SHAPE,
+                      STACKED_GRID_CHANNELS, STACKED_SCALARS)
 from measure_tournament import assign_roster, build_env, episode_outcome
 
 # The two compatible "balanced family" strategies — the only winners kept.
@@ -138,11 +138,11 @@ def collect(n_episodes, value_threshold, margin_threshold):
         "margin_threshold": margin_threshold,
         "duration_seconds": time.time() - t0,
         "feature_builder_contract": (
-            f"grid[{GRID_CHANNELS},16,16] "
+            f"grid[{STACKED_GRID_CHANNELS},16,16] "
             f"base_feats[{NUM_BASES},{BASE_FIELDS}] "
             f"raw_agent{tuple(RAW_AGENT_SHAPE)} "
             f"raw_base{tuple(RAW_BASE_SHAPE)} "
-            f"scalar[{FEATURE_SCALARS}]"),
+            f"scalar[{STACKED_SCALARS}]"),
         "winners": [{"episode_id": e["episode_id"],
                      "winner_strategy": e["winner_strategy"],
                      "winner_value": e["winner_value"],

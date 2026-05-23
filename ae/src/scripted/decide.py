@@ -1,6 +1,6 @@
 """The cascade runner: act() executes a Strategy's layer sequence."""
 from scripted.danger import DangerMap
-from scripted.geometry import BACKWARD, FORWARD, LEFT, PLACE_BOMB, RIGHT, STAY
+from scripted.geometry import BACKWARD, FORWARD, LEFT, MOVE, PLACE_BOMB, RIGHT, STAY
 from scripted.pathfind import build_planner
 from scripted.strategies import STRATEGIES
 
@@ -31,11 +31,20 @@ def _record(belief, action, layer):
     return action
 
 
+def _legal(action, mask):
+    return action is not None and 0 <= action < len(mask) and mask[action] == 1
+
+
 def act(belief, action_mask, strategy=None):
     """Run a Strategy's layer cascade and return a legal action int.
 
     `belief` must already be updated with the current observation.
     `strategy` defaults to the balanced strategy (the qualifier agent).
+
+    After the cascade picks an action, the strategy's post-decision `gates`
+    run in order: each gate may return an int to override (silently dropped
+    if illegal) or None to pass through. Gates can encode opening rules,
+    forced overrides, etc.
     """
     if strategy is None:
         strategy = STRATEGIES["balanced"]
@@ -46,11 +55,29 @@ def act(belief, action_mask, strategy=None):
     danger = DangerMap(belief.enemy_bombs, belief)
     planner = build_planner(belief, danger)
 
+    chosen, source = None, None
     for layer in strategy.layers:
         action = layer(belief, danger, planner, strategy.params)
-        if action is not None and 0 <= action < len(mask) and mask[action] == 1:
-            return _record(belief, action, layer.__name__)
+        if _legal(action, mask):
+            chosen, source = action, layer.__name__
+            break
+    if chosen is None:
+        chosen = _first_legal(mask, [FORWARD, BACKWARD, LEFT, RIGHT, STAY])
+        source = "first_legal"
 
-    return _record(
-        belief, _first_legal(mask, [FORWARD, BACKWARD, LEFT, RIGHT, STAY]),
-        "first_legal")
+    for gate in getattr(strategy, "gates", ()):
+        override = gate(belief, danger, planner, strategy.params, chosen)
+        if _legal(override, mask):
+            chosen, source = override, f"gate:{gate.__name__}"
+
+    # Stuck-detection plumbing: store where we expect to be next tick.
+    if chosen == FORWARD:
+        dx, dy = MOVE[belief.facing]
+        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
+    elif chosen == BACKWARD:
+        dx, dy = MOVE[(belief.facing + 2) % 4]
+        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
+    else:
+        belief.expected_location = belief.location
+
+    return _record(belief, chosen, source)

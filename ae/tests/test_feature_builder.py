@@ -31,11 +31,11 @@ def test_build_returns_five_tensors_with_frozen_shapes():
     obs = _first_obs()
     fb = FeatureBuilder()
     grid, base_feats, raw_agent, raw_base, scalar = fb.build(obs)
-    assert grid.shape == (F.GRID_CHANNELS, F.GRID_SIZE, F.GRID_SIZE)
+    assert grid.shape == (F.STACKED_GRID_CHANNELS, F.GRID_SIZE, F.GRID_SIZE)
     assert base_feats.shape == (F.NUM_BASES, F.BASE_FIELDS)
     assert raw_agent.shape == F.RAW_AGENT_SHAPE
     assert raw_base.shape == F.RAW_BASE_SHAPE
-    assert scalar.shape == (F.FEATURE_SCALARS,)
+    assert scalar.shape == (F.STACKED_SCALARS,)
     for t in (grid, base_feats, raw_agent, raw_base, scalar):
         assert t.dtype == np.float32
 

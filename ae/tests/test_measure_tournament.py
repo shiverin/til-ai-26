@@ -65,9 +65,8 @@ def _uniform_roster():
 
 def test_aggregate_win_counts_and_entropy_even():
     from measure_tournament import aggregate
-    # _uniform_roster() uses only the first len(SLOTS)=6 strategies; the 7th
-    # and 8th (forager, lean_rush) are absent from every roster so their
-    # win_count must be 0.
+    # _uniform_roster() uses only the first len(SLOTS)=6 strategies; the
+    # remainder are absent from every roster so their win_count must be 0.
     roster = _uniform_roster()
     strategies_in_roster = list(roster.values())
     records = []
@@ -83,7 +82,7 @@ def test_aggregate_win_counts_and_entropy_even():
         if s not in strategies_in_roster:
             assert summary["per_strategy"][s]["win_count"] == 0
     # entropy over the 6 active strategies is log2(6); normalised divides by
-    # log2(len(STRATEGY_NAMES)) = log2(9) since the 7th, 8th, and 9th have win_rate=0.
+    # log2(len(STRATEGY_NAMES)) since the remaining strategies have win_rate=0.
     assert abs(summary["win_entropy_bits"] - math.log2(6)) < 1e-9
     expected_normalized = math.log2(6) / math.log2(len(STRATEGY_NAMES))
     assert abs(summary["win_entropy_normalized"] - expected_normalized) < 1e-9
@@ -168,3 +167,21 @@ def test_decision_hint_flags_spread():
     }
     hint = decision_hint(summary)
     assert "spread" in hint.lower()
+
+
+def test_assign_roster_can_select_adaptive():
+    # With 10 strategies in the pool and 6 slots, `adaptive` must be drawable
+    # by at least some seed. Sample 200 rosters and confirm `adaptive` appears
+    # in at least one of them.
+    seen = set()
+    for seed in range(200):
+        seen |= set(assign_roster(seed).values())
+    assert "adaptive" in seen, "adaptive never sampled across 200 rosters"
+
+
+def test_assign_roster_yields_six_distinct_strategies():
+    # Sanity: a single roster is 6 distinct strategies all from STRATEGY_NAMES.
+    roster = assign_roster(7)
+    values = list(roster.values())
+    assert len(set(values)) == 6
+    assert set(values) <= set(STRATEGY_NAMES)

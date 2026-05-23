@@ -1,13 +1,19 @@
 """League pool: scripted anchors are permanent; snapshots accumulate."""
 from league import League
+from scripted.strategies import STRATEGIES
 
 
-def test_six_scripted_anchors_present():
+def test_every_strategy_is_an_anchor():
     lg = League()
     names = {m.name for m in lg.members()}
-    for strat in ("balanced", "balanced_extreme", "base_rusher",
-                  "base_rusher_extreme", "collector", "camper"):
+    for strat in STRATEGIES.keys():
         assert f"scripted:{strat}" in names
+
+
+def test_anchor_count_matches_strategies_count():
+    lg = League()
+    anchors = [m for m in lg.members() if m.kind == "scripted"]
+    assert len(anchors) == len(STRATEGIES)
 
 
 def test_snapshot_adds_a_checkpoint_member(tmp_path):
@@ -25,4 +31,4 @@ def test_anchors_never_removed_when_pool_capped(tmp_path):
     ckpts = [m for m in lg.members() if m.kind == "checkpoint"]
     anchors = [m for m in lg.members() if m.kind == "scripted"]
     assert len(ckpts) == 2          # pool capped
-    assert len(anchors) == 6        # anchors untouched
+    assert len(anchors) == len(STRATEGIES)   # anchors untouched

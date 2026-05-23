@@ -2,7 +2,7 @@
 import numpy as np
 
 from bc import collect_dagger_dataset, BCSample
-from features import GRID_CHANNELS
+from features import STACKED_GRID_CHANNELS, STACKED_SCALARS
 from policy import SymbolicTransformerActor, NUM_ACTIONS
 
 
@@ -18,8 +18,8 @@ def test_teacher_only_dataset_shapes():
     assert len(ds) > 0
     s = ds[0]
     assert isinstance(s, BCSample)
-    assert s.grid.shape == (GRID_CHANNELS, 16, 16)
-    assert s.scalar.shape == (10,)
+    assert s.grid.shape == (STACKED_GRID_CHANNELS, 16, 16)
+    assert s.scalar.shape == (STACKED_SCALARS,)
     assert 0 <= s.action < NUM_ACTIONS
     assert s.mask.shape == (NUM_ACTIONS,)
 
@@ -40,13 +40,14 @@ def test_mixed_rollout_runs():
 
 def test_bcsample_carries_five_tensors():
     from bc import collect_dagger_dataset
+    from features import STACKED_GRID_CHANNELS, STACKED_SCALARS
     ds = collect_dagger_dataset("balanced", None, 1.0, 1, [0])
     s = ds[0]
-    assert s.grid.shape == (17, 16, 16)
+    assert s.grid.shape == (STACKED_GRID_CHANNELS, 16, 16)
     assert s.base_feats.shape == (5, 11)
     assert s.raw_agent.shape == (7, 5, 25)
     assert s.raw_base.shape == (7, 7, 25)
-    assert s.scalar.shape == (10,)
+    assert s.scalar.shape == (STACKED_SCALARS,)
     assert s.mask.shape == (6,)
 
 
@@ -70,3 +71,73 @@ def test_dataset_contains_bomb_labels():
     assert 5 in actions, (
         f"no PLACE_BOMB (action 5) labels in dataset; actions present={sorted(actions)}"
     )
+
+
+def test_default_opponent_pool_excludes_teacher():
+    from bc import _default_opponent_pool
+    from scripted.strategies import STRATEGIES
+    pool = _default_opponent_pool(teacher_name="balanced_extreme_opening")
+    # build an agent from each non-RandomAgent factory and read its name
+    names = []
+    for factory in pool:
+        ag = factory()
+        names.append(ag.name)
+    assert "scripted:balanced_extreme_opening" not in names
+    # every other registered strategy IS represented
+    for name in STRATEGIES:
+        if name == "balanced_extreme_opening":
+            continue
+        assert f"scripted:{name}" in names
+
+
+def test_default_opponent_pool_keeps_random_padding():
+    from bc import _default_opponent_pool, RandomAgent
+    pool = _default_opponent_pool(teacher_name="balanced_extreme_opening")
+    random_count = sum(1 for f in pool if f is RandomAgent)
+    assert random_count == 4
+
+
+def test_collect_dagger_dataset_parallel_matches_sequential_count():
+    """Parallel collection should produce the same number of BCSamples as
+    sequential — episode count is the only invariant we can compare cheaply
+    (trajectories differ across runs due to per-worker RNG seeding).
+    """
+    from bc import collect_dagger_dataset
+    n_ep = 4
+    seeds = list(range(n_ep))
+    seq = collect_dagger_dataset("balanced_extreme_opening", None, 1.0,
+                                  n_ep, seeds, num_workers=1, progress=False)
+    par = collect_dagger_dataset("balanced_extreme_opening", None, 1.0,
+                                  n_ep, seeds, num_workers=2, progress=False)
+    # Same episode count and per-episode length (200 steps), so total samples
+    # are equal regardless of which slot the learner occupies each episode.
+    # Each episode contributes exactly one BCSample per env step the learner
+    # was active for — that's deterministic given the seed list, so totals
+    # must match exactly.
+    assert len(par) == len(seq) > 0
+
+
+def test_opponent_pool_meta_round_trip():
+    from bc import _opponent_pool_meta, _opponent_pool_from_meta, RandomAgent
+    from scripted.strategies import STRATEGIES
+    meta = _opponent_pool_meta("balanced_extreme_opening")
+    pool = _opponent_pool_from_meta(meta)
+    # 4 RandomAgent classes + (len(STRATEGIES) - 1) scripted lambdas
+    randoms = [f for f in pool if f is RandomAgent]
+    scripteds = [f for f in pool if f is not RandomAgent]
+    assert len(randoms) == 4
+    assert len(scripteds) == len(STRATEGIES) - 1
+    # Each lambda must produce a ScriptedAgent with a distinct strategy name
+    names = sorted(f().name for f in scripteds)
+    expected = sorted(f"scripted:{s}" for s in STRATEGIES
+                       if s != "balanced_extreme_opening")
+    assert names == expected
+
+
+def test_collect_dagger_dataset_custom_pool_rejects_parallel():
+    """Custom opponent_pool can't be pickled — must error early when num_workers>1."""
+    import pytest
+    from bc import collect_dagger_dataset, RandomAgent
+    with pytest.raises(ValueError, match="custom opponent_pool"):
+        collect_dagger_dataset("balanced", None, 1.0, 2, [0, 1],
+                                opponent_pool=[RandomAgent], num_workers=2)

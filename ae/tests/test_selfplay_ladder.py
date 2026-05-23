@@ -1,12 +1,13 @@
 """Rung ladder: opponent set per rung; promotion gated on win-rate."""
 from train_selfplay import RungLadder
 from league import League
+from scripted.strategies import STRATEGIES
 
 
-def test_rung1_opponents_are_six_scripted():
+def test_rung1_opponents_match_strategy_count():
     ladder = RungLadder(League(), promote_winrate=0.7)
     opps = ladder.current_opponents()
-    assert len(opps) == 6
+    assert len(opps) == len(STRATEGIES)
     assert all(m.kind == "scripted" for m in opps)
     assert ladder.rung == 1
 

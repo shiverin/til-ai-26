@@ -12,16 +12,16 @@ import onnxruntime as ort
 import torch
 
 from export_onnx import export_actor
-from policy import SymbolicTransformerActor
+from policy import SymbolicTransformerActor, STACKED_GRID_CHANNELS, STACKED_SCALARS
 
 
 def _inputs(n=2):
     return {
-        "grid": np.random.randn(n, 17, 16, 16).astype(np.float32),
+        "grid": np.random.randn(n, STACKED_GRID_CHANNELS, 16, 16).astype(np.float32),
         "base_feats": np.random.randn(n, 5, 11).astype(np.float32),
         "raw_agent": np.random.randn(n, 7, 5, 25).astype(np.float32),
         "raw_base": np.random.randn(n, 7, 7, 25).astype(np.float32),
-        "scalar": np.random.randn(n, 10).astype(np.float32),
+        "scalar": np.random.randn(n, STACKED_SCALARS).astype(np.float32),
     }
 
 

@@ -6,11 +6,11 @@ to ONNX for the inference container. Keeping the network here means the
 architecture cannot drift between training and serving.
 
 The observation is the five-tensor contract emitted by FeatureBuilder.build():
-    grid       [N, 17, 16, 16]  abstraction tile grid
+    grid       [N, 85, 16, 16]  abstraction tile grid (K=5 stacked)
     base_feats [N, 5, 11]       abstraction per-base matrix
     raw_agent  [N, 7, 5, 25]    raw residual viewcone (agent)
     raw_base   [N, 7, 7, 25]    raw residual viewcone (base)
-    scalar     [N, 10]          scalar token
+    scalar     [N, 50]          scalar token (K=5 stacked)
 These become one token sequence: [CLS]·1 + tiles·256 + bases·5 + raw·84 +
 scalar·1 = 347 tokens. Each group carries a learned type embedding so attention
 can tell the branches apart. CLS -> action head.
@@ -32,6 +32,9 @@ NUM_BASES = 5
 BASE_FIELDS = 11
 RAW_CHANNELS = 25
 SYMBOLIC_SCALARS = 10
+STACK = 5
+STACKED_GRID_CHANNELS = GRID_CHANNELS * STACK     # 85
+STACKED_SCALARS = SYMBOLIC_SCALARS * STACK        # 50
 
 GRID = 16
 NUM_TILES = GRID * GRID            # 256 tile tokens
@@ -103,8 +106,8 @@ class _TransformerBlock(nn.Module):
 class SymbolicTransformerActor(nn.Module):
     """Two-branch transformer actor over the five-tensor feature contract.
 
-    Input: grid [N,17,16,16], base_feats [N,5,11], raw_agent [N,7,5,25],
-    raw_base [N,7,7,25], scalar [N,10]. Output: action logits [N,6]. No value
+    Input: grid [N,85,16,16], base_feats [N,5,11], raw_agent [N,7,5,25],
+    raw_base [N,7,7,25], scalar [N,50]. Output: action logits [N,6]. No value
     head — the critic is a separate network. Model scale is configurable;
     self.cfg records the resolved config for checkpointing.
     """
@@ -117,12 +120,13 @@ class SymbolicTransformerActor(nn.Module):
         self.cfg = {"d_model": d_model, "n_layers": n_layers,
                     "n_heads": n_heads, "ffn_dim": ffn_dim, "dropout": dropout}
 
-        # per-branch token embeddings
-        self.tile_embed = nn.Linear(GRID_CHANNELS, d_model)
+        # per-branch token embeddings — tile_embed and scalar_embed consume
+        # the K-frame stacked inputs along the channel/scalar axis.
+        self.tile_embed = nn.Linear(STACKED_GRID_CHANNELS, d_model)
         self.base_embed = nn.Linear(BASE_FIELDS, d_model)
         self.raw_embed = nn.Linear(RAW_CHANNELS, d_model)
         self.scalar_embed = nn.Sequential(
-            nn.Linear(SYMBOLIC_SCALARS, d_model), nn.GELU())
+            nn.Linear(STACKED_SCALARS, d_model), nn.GELU())
 
         # position tables: world-frame tiles, per-base slots, raw viewcone
         self.spatial_pos = nn.Parameter(torch.zeros(NUM_TILES, d_model))
@@ -145,8 +149,8 @@ class SymbolicTransformerActor(nn.Module):
     def forward(self, grid, base_feats, raw_agent, raw_base, scalar):
         n = grid.shape[0]
 
-        # abstraction tile tokens: [N,17,16,16] -> [N,256,17] -> [N,256,d]
-        tiles = grid.permute(0, 2, 3, 1).reshape(n, NUM_TILES, GRID_CHANNELS)
+        # abstraction tile tokens: [N,85,16,16] -> [N,256,85] -> [N,256,d]
+        tiles = grid.permute(0, 2, 3, 1).reshape(n, NUM_TILES, STACKED_GRID_CHANNELS)
         tile_tok = (self.tile_embed(tiles) + self.spatial_pos
                     + self.type_embed[TYPE_TILE])
 

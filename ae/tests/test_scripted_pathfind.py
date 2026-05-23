@@ -89,7 +89,9 @@ def test_destructible_wall_opens_at_bomb_detonation_tick():
     }
     b.ally_bombs = {(0, 0): 3}                    # blast opens the wall at tick 3
     p = build_planner(b, DangerMap({}, b))
-    assert p.dist_to((1, 0)) == 3                 # STAY, STAY, FORWARD (arrive tick 3)
+    # Wall opens during DETONATE at tick 3, which runs AFTER the MOVE at tick
+    # 3 — so the earliest the agent can cross is tick 4.
+    assert p.dist_to((1, 0)) == 4
 
 
 def test_enemy_blast_forbids_a_cell_only_on_its_detonation_tick():
@@ -111,6 +113,7 @@ def test_place_bomb_first_forces_place_then_opens_loc_walls():
     }
     p = build_planner(b, DangerMap({}, b), place_bomb_first=True)
     assert p.first_action((1, 0)) == PLACE_BOMB   # forced opening move
-    # The hypothetical bomb opens (0,0)|(1,0) at tick 1 + BOMB_TIMER; the agent
-    # places (tick 1), waits, and crosses on the opening tick.
-    assert p.dist_to((1, 0)) == 1 + BOMB_TIMER
+    # The hypothetical bomb opens (0,0)|(1,0) at tick `1 + BOMB_TIMER`; the
+    # wall opens AFTER MOVE at that tick, so the earliest cross is one tick
+    # later.
+    assert p.dist_to((1, 0)) == 2 + BOMB_TIMER

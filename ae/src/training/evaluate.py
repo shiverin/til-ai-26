@@ -14,6 +14,7 @@ import torch
 
 from features import FeatureBuilder
 from policy import SymbolicTransformerActor
+from scripted import greedy as _greedy_mod
 from scripted.belief import Belief
 from scripted.decide import act
 from scripted.map_prior import MapPrior
@@ -61,14 +62,62 @@ class ScriptedAgent:
         return int(act(self.belief, observation["action_mask"], self.strategy))
 
 
-class NeuralAgent:
-    """A trained SymbolicTransformerActor served with greedy argmax."""
+class NoisyScriptedAgent:
+    """ScriptedAgent wrapper that with prob ε replaces the strategy's action
+    with a uniform random LEGAL action. Used in training rollouts only; eval
+    constructs plain ScriptedAgent so eval scores stay comparable."""
 
-    def __init__(self, actor, name="neural"):
+    def __init__(self, strategy_name, epsilon, rng=None):
+        self._inner = ScriptedAgent(strategy_name)
+        self.name = f"scripted:{strategy_name}"   # bookkeeping-equivalent to inner
+        self._eps = float(epsilon)
+        self._rng = rng or random.Random()
+
+    def reset(self):
+        self._inner.reset()
+
+    def action(self, observation):
+        if self._eps > 0 and self._rng.random() < self._eps:
+            mask = np.asarray(observation["action_mask"], dtype=bool).reshape(-1)
+            legal = np.flatnonzero(mask)
+            if len(legal):
+                return int(self._rng.choice(legal.tolist()))
+        return self._inner.action(observation)
+
+
+class GreedyAgent:
+    """The standalone greedy AE agent (A* to nearest live enemy base)."""
+    name = "greedy"
+
+    def __init__(self):
+        self.prior = MapPrior.load()
+        self.belief = Belief()
+        self._started = False
+
+    def reset(self):
+        self._started = False
+
+    def action(self, observation):
+        step = int(np.asarray(observation["step"]).flat[0])
+        if step == 0 or not self._started:
+            self.prior.identify_team(observation["base_location"])
+            self.belief.reset(self.prior)
+            self._started = True
+        self.belief.update(observation)
+        return int(_greedy_mod.act(self.belief, observation["action_mask"]))
+
+
+class NeuralAgent:
+    """A trained SymbolicTransformerActor. By default samples from a
+    masked Categorical at temperature 1.0 (uniform over legal when logits
+    are flat); higher T → more random opponent for league diversity."""
+
+    def __init__(self, actor, name="neural", temperature=1.0):
         self.name = name
         self.actor = actor
         self.actor.eval()
         self.fb = FeatureBuilder()
+        self._t = float(temperature)
 
     def reset(self):
         self.fb = FeatureBuilder()
@@ -84,9 +133,12 @@ class NeuralAgent:
                 torch.from_numpy(raw_agent).unsqueeze(0),
                 torch.from_numpy(raw_base).unsqueeze(0),
                 torch.from_numpy(scalar).unsqueeze(0),
-            )[0].numpy()
-        logits = np.where(mask, logits, -1e8)
-        return int(np.argmax(logits))
+            )[0]
+        mask_t = torch.from_numpy(mask)
+        scaled = torch.where(mask_t, logits / self._t,
+                              torch.full_like(logits, -1e8))
+        dist = torch.distributions.Categorical(logits=scaled)
+        return int(dist.sample().item())
 
 
 @dataclass

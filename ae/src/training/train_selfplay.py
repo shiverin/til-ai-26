@@ -14,19 +14,27 @@ import sys
 import multiprocessing
 from dataclasses import dataclass, field
 
+# Must precede `import torch` — the CUDA caching allocator reads this once at
+# import time. `expandable_segments:True` lets the allocator grow / shrink
+# segments to reduce fragmentation, which matters under variable batch sizes
+# from slot-rotation and the K=5 stacked input.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 
 # ae/src holds scripted/, policy.py; conftest.py adds it for tests, a
 # standalone run needs this too.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 from critic import (CentralizedCritic, encode_global_state, STATE_PLANES,
                     STATE_SCALARS)
-from evaluate import RandomAgent, ScriptedAgent, NeuralAgent
-from features import (FeatureBuilder, GRID_CHANNELS, NUM_BASES, BASE_FIELDS,
-                       RAW_AGENT_SHAPE, RAW_BASE_SHAPE, FEATURE_SCALARS)
+from evaluate import (RandomAgent, ScriptedAgent, NeuralAgent,
+                       NoisyScriptedAgent)
+from features import (FeatureBuilder, NUM_BASES, BASE_FIELDS,
+                       RAW_AGENT_SHAPE, RAW_BASE_SHAPE,
+                       STACKED_GRID_CHANNELS, STACKED_SCALARS)
 from league import League
 from policy import SymbolicTransformerActor, NUM_ACTIONS
 from scripted.belief import Belief
@@ -43,18 +51,35 @@ GRID_SIZE = 16
 
 # ----- opponent registry -------------------------------------------------- #
 class OpponentRegistry:
-    """Builds per-slot opponent agents from a league Member or a fixed spec.
+    """Builds per-slot opponent agents.
 
-    A league checkpoint Member loads a frozen SymbolicTransformerActor; a scripted Member
-    loads its strategy. `make(member)` returns a stateful agent with reset() and
-    action(observation).
+    Two entry points:
+    - make(member): exact factory used by the league fix-up path and tests.
+      Builds the exact agent for a given league Member (or 'random').
+    - sample_slot_opponent(rung_opponents): per-slot RANDOMIZED draw used by
+      training rollouts to broaden the (kind × instance) distribution. Returns
+      (member_for_bookkeeping, agent). Kinds:
+        - "league":  sample from `rung_opponents` (rung anchors at rung 1,
+                     PFSP-sampled checkpoints at rungs 2/3). Scripted draws
+                     wrap in NoisyScriptedAgent(eps); neural draws wrap in
+                     NeuralAgent(temperature=neural_t).
+        - "random":  RandomAgent(); bookkeeping member is the string "random".
+        - "noisy_scripted": uniform pick from anchors, NoisyScriptedAgent wrap.
+        - "raw_scripted":   uniform pick from anchors, ScriptedAgent (clean).
     """
 
-    def __init__(self, league):
+    def __init__(self, league, mix_weights=(0.50, 0.25, 0.15, 0.10),
+                 opp_eps_noise=0.08, opp_neural_temperature=1.2, rng=None):
         self.league = league
         self._actor_cache = {}
+        self._mix_weights = tuple(mix_weights)
+        self._eps = float(opp_eps_noise)
+        self._neural_t = float(opp_neural_temperature)
+        self._rng = rng or random.Random()
 
     def make(self, member):
+        """Build an agent for an exact league Member (or the string 'random').
+        Used by the league-bookkeeping fix-up path and by tests."""
         if member is None or member == "random":
             return RandomAgent()
         if member.kind == "scripted":
@@ -65,6 +90,39 @@ class OpponentRegistry:
             actor.eval()
             self._actor_cache[member.ref] = actor
         return NeuralAgent(self._actor_cache[member.ref], name=member.name)
+
+    def sample_slot_opponent(self, rung_opponents):
+        """Returns (member_for_bookkeeping, agent). See class docstring."""
+        kind = self._rng.choices(
+            ("league", "random", "noisy_scripted", "raw_scripted"),
+            weights=self._mix_weights, k=1)[0]
+        if kind == "random":
+            return "random", RandomAgent()
+        if kind in ("noisy_scripted", "raw_scripted"):
+            anchors = self.league.anchors()
+            member = self._rng.choice(anchors)
+            if kind == "noisy_scripted":
+                agent = NoisyScriptedAgent(
+                    member.ref, epsilon=self._eps,
+                    rng=random.Random(self._rng.random()))
+            else:
+                agent = ScriptedAgent(member.ref)
+            return member, agent
+        # kind == "league"
+        member = self._rng.choice(rung_opponents)
+        if member.kind == "scripted":
+            agent = NoisyScriptedAgent(
+                member.ref, epsilon=self._eps,
+                rng=random.Random(self._rng.random()))
+        else:
+            if member.ref not in self._actor_cache:
+                actor = SymbolicTransformerActor.from_checkpoint(member.ref)
+                actor.eval()
+                self._actor_cache[member.ref] = actor
+            agent = NeuralAgent(self._actor_cache[member.ref],
+                                 name=member.name,
+                                 temperature=self._neural_t)
+        return member, agent
 
 
 # ----- rollout buffer ----------------------------------------------------- #
@@ -91,11 +149,12 @@ class RolloutBuffer:
 
 def _new_buffer(n):
     return RolloutBuffer(
-        grid=np.zeros((n, GRID_CHANNELS, GRID_SIZE, GRID_SIZE), np.float32),
+        grid=np.zeros((n, STACKED_GRID_CHANNELS, GRID_SIZE, GRID_SIZE),
+                      np.float32),
         base_feats=np.zeros((n, NUM_BASES, BASE_FIELDS), np.float32),
         raw_agent=np.zeros((n, *RAW_AGENT_SHAPE), np.float32),
         raw_base=np.zeros((n, *RAW_BASE_SHAPE), np.float32),
-        scalar=np.zeros((n, FEATURE_SCALARS), np.float32),
+        scalar=np.zeros((n, STACKED_SCALARS), np.float32),
         gstate=np.zeros((n, STATE_PLANES, GRID_SIZE, GRID_SIZE), np.float32),
         gscalar=np.zeros((n, STATE_SCALARS), np.float32),
         actions=np.zeros(n, np.int64),
@@ -109,7 +168,7 @@ def _new_buffer(n):
 
 def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                     opponent_members=None, reward_shaper=None,
-                    return_outcomes=False):
+                    return_outcomes=False, use_sample_mix=False):
     """Roll out `num_episodes` episodes; collect transitions from every
     learner slot. Returns a RolloutBuffer, or (RolloutBuffer, outcomes) when
     return_outcomes=True.
@@ -128,47 +187,68 @@ def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
     cfg = default_config()
     cfg.env.novice = True
     env = bomberman_env.basic_env(env_wrappers=[], cfg=cfg)
-    dynamics = env.unwrapped.dynamics   # entity registry for the critic's global state
-    learner_slots = tuple(learner_slots)
-    n = len(learner_slots) * EPISODE_LEN * num_episodes
-    buf = _new_buffer(n)
+    dynamics = env.unwrapped.dynamics
+
+    rotate = (isinstance(learner_slots, tuple)
+              and len(learner_slots) == 3
+              and learner_slots[0] == "rotate")
+    if rotate:
+        _, lo, hi = learner_slots
+        n_max = hi * EPISODE_LEN * num_episodes
+    else:
+        learner_slots_fixed = tuple(learner_slots)
+        n_max = len(learner_slots_fixed) * EPISODE_LEN * num_episodes
+
+    buf = _new_buffer(n_max)
     actor.eval()
-    device = next(actor.parameters()).device   # feed rollout inputs to the actor's device
+    device = next(actor.parameters()).device
     total_written = 0
-    outcomes = []   # (Member, learner_won) per (episode, opponent slot)
+    outcomes = []
 
     for ep in range(num_episodes):
         seed = seed0 + ep
         random.seed(seed)
         env.reset(seed=seed)
+        ep_rng = random.Random(seed ^ 0xA5A5A5)   # deterministic, decoupled
+        if rotate:
+            k_ep = ep_rng.randint(lo, hi)
+            learner_slots_ep = tuple(ep_rng.sample(SLOTS, k_ep))
+        else:
+            learner_slots_ep = learner_slots_fixed
         ep_scores = {s: 0.0 for s in SLOTS}   # env-default reward per slot
         # opponents fill the non-learner slots
-        opp_slots = [s for s in SLOTS if s not in learner_slots]
+        opp_slots = [s for s in SLOTS if s not in learner_slots_ep]
         opp_agents = {}
         opp_member = {}        # slot -> the league Member (or 'random')
         for s in opp_slots:
-            member = "random" if not opponent_members else random.choice(
-                opponent_members)
-            ag = registry.make(member)
+            if use_sample_mix:
+                # per-slot draw from the kind-mix; fall back to anchors when
+                # opponent_members is empty/None.
+                rung_pool = opponent_members or registry.league.anchors()
+                member, ag = registry.sample_slot_opponent(rung_pool)
+            else:
+                member = "random" if not opponent_members else random.choice(
+                    opponent_members)
+                ag = registry.make(member)
             ag.reset()
             opp_agents[s] = ag
             opp_member[s] = member
         # per-learner-slot feature builders + last-transition bookkeeping
-        fbs = {s: FeatureBuilder() for s in learner_slots}
-        # run-contiguous base index: episode ep, slot at position j in learner_slots
-        # occupies buf indices [base : base + EPISODE_LEN]
-        slot_base = {s: (ep * len(learner_slots) + j) * EPISODE_LEN
-                     for j, s in enumerate(learner_slots)}
+        fbs = {s: FeatureBuilder(teacher_strategy="balanced_extreme_opening")
+               for s in learner_slots_ep}
+        # run-contiguous base index using running total_written cursor
+        slot_base = {s: total_written + j * EPISODE_LEN
+                     for j, s in enumerate(learner_slots_ep)}
         # per-slot write cursor within the run (0 .. EPISODE_LEN-1)
-        slot_cursor = {s: 0 for s in learner_slots}
+        slot_cursor = {s: 0 for s in learner_slots_ep}
         # last buffer index written for each slot (for reward/done back-fill)
-        prev_idx = {s: None for s in learner_slots}
+        prev_idx = {s: None for s in learner_slots_ep}
 
         for slot in env.agent_iter():
             obs, reward, term, trunc, _ = env.last()
             ep_scores[slot] += float(reward)
             done = term or trunc
-            if slot in learner_slots:
+            if slot in learner_slots_ep:
                 step = int(np.asarray(obs["step"]).flat[0])
                 if prev_idx[slot] is not None:
                     r = float(reward)
@@ -216,8 +296,8 @@ def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                 else:
                     env.step(opp_agents[slot].action(obs))
         # --- per-opponent-slot outcomes for league.record_result (§6.2) ---
-        learner_mean = (sum(ep_scores[s] for s in learner_slots)
-                        / len(learner_slots))
+        learner_mean = (sum(ep_scores[s] for s in learner_slots_ep)
+                        / len(learner_slots_ep))
         for s in opp_slots:
             member = opp_member[s]
             if member == "random":
@@ -225,10 +305,24 @@ def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
             learner_won = learner_mean > ep_scores[s]
             outcomes.append((member, learner_won))
     env.close()
-    assert total_written == n, f"collected {total_written}, expected {n}"
+    if total_written < n_max:
+        buf = _slice_buffer(buf, total_written)
     if return_outcomes:
         return buf, outcomes
     return buf
+
+
+def _slice_buffer(buf, n):
+    """Return a new RolloutBuffer with each field sliced to [:n]."""
+    return RolloutBuffer(
+        grid=buf.grid[:n], base_feats=buf.base_feats[:n],
+        raw_agent=buf.raw_agent[:n], raw_base=buf.raw_base[:n],
+        scalar=buf.scalar[:n], gstate=buf.gstate[:n],
+        gscalar=buf.gscalar[:n], actions=buf.actions[:n],
+        logprobs=buf.logprobs[:n], rewards=buf.rewards[:n],
+        env_rewards=buf.env_rewards[:n], dones=buf.dones[:n],
+        masks=buf.masks[:n],
+    )
 
 
 def _concat_buffers(bufs):
@@ -251,11 +345,17 @@ def _concat_buffers(bufs):
 
 
 def _worker_rollout(state_dict, cfg, learner_slots, num_episodes, seed0,
-                    opponent_members, reward_shaper):
+                    opponent_members, reward_shaper, use_sample_mix,
+                    registry_kwargs=None):
     """Pool-worker entry point: rebuild a SymbolicTransformerActor from the CPU
     `state_dict` and `cfg` supplied by the caller and run `num_episodes` episodes
     via the unchanged collect_rollout. Top-level + picklable so multiprocessing
-    can dispatch it. Returns (RolloutBuffer, outcomes)."""
+    can dispatch it. Returns (RolloutBuffer, outcomes).
+
+    registry_kwargs is a plain dict forwarded to OpponentRegistry (excluding
+    `rng`, which is instead reconstructed per-worker from an optional `rng_seed`
+    int so that each worker chunk has its own independent deterministic stream).
+    """
     torch.set_num_threads(1)   # one thread per worker — avoid core oversubscription
     random.seed(seed0)
     np.random.seed(seed0)
@@ -263,10 +363,21 @@ def _worker_rollout(state_dict, cfg, learner_slots, num_episodes, seed0,
     actor = SymbolicTransformerActor(**cfg)
     actor.load_state_dict(state_dict)
     actor.eval()
-    registry = OpponentRegistry(league=None)   # make() never touches the league
+    if use_sample_mix:
+        # use_sample_mix needs anchors → real League; thread the user's
+        # mix / eps / temperature / rng-seed through from main.
+        rk = dict(registry_kwargs or {})
+        # Translate the rng_seed int (or None) into a Random instance inside
+        # the worker so each worker has an independent deterministic stream.
+        rng_seed = rk.pop("rng_seed", None)
+        rk["rng"] = random.Random(seed0 if rng_seed is None else rng_seed ^ seed0)
+        registry = OpponentRegistry(league=League(), **rk)
+    else:
+        registry = OpponentRegistry(league=None)
     return collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                            opponent_members=opponent_members,
-                           reward_shaper=reward_shaper, return_outcomes=True)
+                           reward_shaper=reward_shaper, return_outcomes=True,
+                           use_sample_mix=use_sample_mix)
 
 
 def _worker_rollout_star(args):
@@ -277,7 +388,8 @@ def _worker_rollout_star(args):
 
 def collect_rollout_parallel(actor, learner_slots, num_episodes, seed0,
                              opponent_members, reward_shaper, pool, num_workers,
-                             progress=True):
+                             progress=True, use_sample_mix=False,
+                             registry_kwargs=None):
     """Parallel episode rollout: split `num_episodes` into contiguous chunks,
     run collect_rollout per chunk across `num_workers` pool workers, and
     concatenate. Episode `ep` keeps seed `seed0 + ep` regardless of chunking.
@@ -286,12 +398,19 @@ def collect_rollout_parallel(actor, learner_slots, num_episodes, seed0,
 
     progress: when True (default), dispatch one episode per task and show a
     tqdm bar as tasks complete. Pass False to chunk by worker count and
-    dispatch silently. Returns (RolloutBuffer, outcomes)."""
+    dispatch silently.
+
+    registry_kwargs: forwarded to _worker_rollout so the user's --opp-* knobs
+    (mix_weights, opp_eps_noise, opp_neural_temperature, rng_seed) reach each
+    worker's OpponentRegistry. Pass None to use class defaults.
+
+    Returns (RolloutBuffer, outcomes)."""
     workers = max(1, min(num_workers, num_episodes))
     n_chunks = num_episodes if progress else workers
     base, extra = divmod(num_episodes, n_chunks)
     state_dict = {k: v.cpu() for k, v in actor.state_dict().items()}
     cfg = actor.cfg
+    rk = registry_kwargs or {}
     tasks = []
     offset = 0
     for i in range(n_chunks):
@@ -299,7 +418,7 @@ def collect_rollout_parallel(actor, learner_slots, num_episodes, seed0,
         if count == 0:
             continue
         tasks.append((state_dict, cfg, learner_slots, count, seed0 + offset,
-                      opponent_members, reward_shaper))
+                      opponent_members, reward_shaper, use_sample_mix, rk))
         offset += count
     if progress:
         from tqdm.auto import tqdm
@@ -354,7 +473,8 @@ import torch.optim as optim
 
 @dataclass
 class PPOConfig:
-    learning_rate: float = 1e-5      # KNOB
+    learning_rate: float = 1e-5      # KNOB — actor LR; critic uses critic_learning_rate
+    critic_learning_rate: float = 1e-4  # KNOB — 10× actor LR; bump to 3e-4 if explained_variance stalls < 0.3
     num_minibatches: int = 8         # KNOB — bumped from 4: 4 minibatches OOM'd
                                      # on a T4 (the 347-token transformer's
                                      # attention is [mb, h, T, T] per layer
@@ -369,20 +489,38 @@ class PPOConfig:
 
 
 def make_optimizer(actor, critic, cfg):
-    """Adam over the actor + centralized-critic parameters.
+    """Adam over actor + centralized-critic parameters with SEPARATE LRs.
+
+    The actor uses cfg.learning_rate (default 1e-5). The critic uses
+    cfg.critic_learning_rate (default 1e-4) — typically 10× the actor LR so the
+    critic stays close to its pretraining LR (3e-4) and can track the moving
+    policy. Splits via parameter groups so the existing single-optimizer
+    plumbing in ppo_update / main is preserved (opt.step() updates both groups).
 
     Build one per training run and thread it through ppo_update so its Adam
     momentum state persists across updates — and dies with the run. (The old
     module-global cache keyed by id() could alias a freed actor's optimizer
     onto a new one after id reuse, and leaked across tests.)
     """
-    return optim.Adam(list(actor.parameters()) + list(critic.parameters()),
-                      lr=cfg.learning_rate, eps=1e-5)
+    return optim.Adam([
+        {"params": list(actor.parameters()), "lr": cfg.learning_rate},
+        {"params": list(critic.parameters()), "lr": cfg.critic_learning_rate},
+    ], eps=1e-5)
 
 
 def ppo_update(actor, critic, opt, buf, advantages, returns, cfg, device):
     """One PPO update over the rollout buffer. Trains actor + centralized
-    critic via the caller-owned optimizer `opt` (see make_optimizer)."""
+    critic via the caller-owned optimizer `opt` (see make_optimizer).
+
+    Returns a metrics dict with:
+      policy_loss, value_loss, entropy         — losses
+      explained_variance                       — 1 - Var(returns - values) / Var(returns)
+                                                  pre-update; near 1 = good critic fit
+      approx_kl                                — mean KL between old and new policy
+      clipfrac                                 — fraction of minibatches where ratio
+                                                  was clipped
+      advantage_mean, advantage_std            — pre-normalization advantage stats
+    """
     n = buf.size
     grid = torch.from_numpy(buf.grid).to(device)
     base_feats = torch.from_numpy(buf.base_feats).to(device)
@@ -397,11 +535,27 @@ def ppo_update(actor, critic, opt, buf, advantages, returns, cfg, device):
     adv = torch.from_numpy(np.asarray(advantages, np.float32)).to(device)
     ret = torch.from_numpy(np.asarray(returns, np.float32)).to(device)
 
+    # explained_variance on the pre-update values (the ones GAE was computed
+    # from). 1.0 = perfect fit; 0.0 = no better than predicting the mean;
+    # negative = worse than the mean.
+    # advantages = returns - values  =>  values = returns - advantages
+    values_np = (np.asarray(returns, np.float32)
+                 - np.asarray(advantages, np.float32))
+    var_returns = float(np.var(np.asarray(returns, np.float32)))
+    explained_variance = (
+        1.0 - float(np.var(np.asarray(returns, np.float32) - values_np))
+              / (var_returns + 1e-8)
+        if var_returns > 0 else 0.0
+    )
+
     mb_size = max(1, n // cfg.num_minibatches)
     inds = np.arange(n)
     actor.train()
     critic.train()
     pg = vl = ent = torch.zeros((), device=device)
+    kl_sum = 0.0
+    cf_sum = 0.0
+    mb_count = 0
     for _ in range(cfg.update_epochs):
         np.random.shuffle(inds)
         for start in range(0, n, mb_size):
@@ -410,7 +564,8 @@ def ppo_update(actor, critic, opt, buf, advantages, returns, cfg, device):
             _, newlogp, entropy = actor.act(
                 grid[mbt], base_feats[mbt], raw_agent[mbt], raw_base[mbt],
                 scalar[mbt], masks[mbt], action=actions[mbt])
-            ratio = (newlogp - old_logp[mbt]).exp()
+            log_ratio = newlogp - old_logp[mbt]
+            ratio = log_ratio.exp()
             a = adv[mbt]
             a = (a - a.mean()) / (a.std() + 1e-8)
             pg1 = -a * ratio
@@ -420,14 +575,31 @@ def ppo_update(actor, critic, opt, buf, advantages, returns, cfg, device):
             vl = 0.5 * ((newvalue - ret[mbt]) ** 2).mean()
             ent = entropy.mean()
             loss = pg - cfg.ent_coef * ent + cfg.vf_coef * vl
+
+            # Diagnostics (computed before backward, no_grad-style — these
+            # are scalars derived from existing tensors).
+            with torch.no_grad():
+                kl_sum += float((-log_ratio).mean())   # standard "approx_kl"
+                cf_sum += float(((ratio - 1.0).abs() > cfg.clip_coef)
+                                .float().mean())
+            mb_count += 1
+
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(
                 list(actor.parameters()) + list(critic.parameters()),
                 cfg.max_grad_norm)
             opt.step()
-    return {"policy_loss": float(pg.detach()), "value_loss": float(vl.detach()),
-            "entropy": float(ent.detach())}
+    return {
+        "policy_loss": float(pg.detach()),
+        "value_loss": float(vl.detach()),
+        "entropy": float(ent.detach()),
+        "explained_variance": explained_variance,
+        "approx_kl": kl_sum / max(1, mb_count),
+        "clipfrac": cf_sum / max(1, mb_count),
+        "advantage_mean": float(np.mean(np.asarray(advantages, np.float32))),
+        "advantage_std": float(np.std(np.asarray(advantages, np.float32))),
+    }
 
 
 import time
@@ -521,7 +693,8 @@ def _build_viz_slot_agents(actor, learner_slots, opponents, update):
     slot_agents = {}
     learner_label = f"learner @ upd{update}"
     for s in learner_slots:
-        slot_agents[s] = (NeuralAgent(cpu_actor, name=learner_label),
+        slot_agents[s] = (NeuralAgent(cpu_actor, name=learner_label,
+                                      temperature=0.001),
                           learner_label)
     registry = OpponentRegistry(League())   # stateless factory for agents
     for i, s in enumerate(opp_slots):
@@ -534,22 +707,33 @@ def _build_viz_slot_agents(actor, learner_slots, opponents, update):
 
 @dataclass
 class Args:
-    total_updates: int = 1000                  # KNOB
-    episodes_per_update: int = 4               # KNOB
-    rollout_workers: int = 4                   # KNOB — parallel rollout worker processes
-    learner_slots: tuple = ("agent_0", "agent_1", "agent_2")  # KNOB
+    total_updates: int = 1000
+    episodes_per_update: int = 4
+    rollout_workers: int = 4
+    # Slot configuration: "rotate" picks a random K∈[min,max] per episode from
+    # all 6 slots; "fixed" uses the explicit learner_slots_fixed tuple.
+    learner_slots_mode: str = "rotate"        # KNOB: "rotate" | "fixed"
+    learner_slots_fixed: tuple = ("agent_0", "agent_1", "agent_2")
+    slot_rotation_min: int = 1                # KNOB
+    slot_rotation_max: int = 3                # KNOB
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    snapshot_every: int = 25                   # KNOB
-    eval_every: int = 25                       # KNOB
-    eval_seeds: int = 16                       # KNOB
-    viz_every: int = 25                        # KNOB: 0 disables the viz hook
-    anti_idle_penalty: float = 0.05            # KNOB
+    snapshot_every: int = 25
+    eval_every: int = 25
+    eval_seeds: int = 16
+    viz_every: int = 25
+    anti_idle_penalty: float = 0.05
     bc_init: str = "policy_bc.pt"
-    critic_init: str = "critic_pretrained.pt"  # KNOB — pretrained critic in
-                                               # ae/training; "" -> random critic
+    critic_init: str = "critic_pretrained.pt"
     seed: int = 1
     cuda: bool = True
+    # Robustness knobs
+    opp_eps_noise: float = 0.08               # KNOB: ε for NoisyScriptedAgent
+    opp_neural_temperature: float = 1.2       # KNOB: T for NeuralAgent opponents
+    opp_mix_league: float = 0.50              # KNOB: per-slot opp mix
+    opp_mix_random: float = 0.25              # KNOB
+    opp_mix_noisy_scripted: float = 0.15      # KNOB
+    opp_mix_raw_scripted: float = 0.10        # KNOB
 
 
 def main():
@@ -562,7 +746,7 @@ def main():
     device = torch.device("cuda" if args.cuda and torch.cuda.is_available()
                            else "cpu")
     here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(here, "..", "src")
+    src = os.path.join(here, "..")
     from metrics import MetricsLogger
     from visualize import render_episode
     VIZ_DIR = os.path.join(here, "viz")
@@ -595,13 +779,27 @@ def main():
             print(f"critic_init {critic_path} not found — random critic")
 
     league = League()
-    registry = OpponentRegistry(league)
+    registry = OpponentRegistry(
+        league,
+        mix_weights=(args.opp_mix_league, args.opp_mix_random,
+                     args.opp_mix_noisy_scripted, args.opp_mix_raw_scripted),
+        opp_eps_noise=args.opp_eps_noise,
+        opp_neural_temperature=args.opp_neural_temperature,
+        rng=random.Random(args.seed),
+    )
     ladder = RungLadder(league)
     shaper = AntiIdleShaper(args.anti_idle_penalty, args.total_updates)
     cfg = PPOConfig()
     opt = make_optimizer(actor, critic, cfg)   # one optimizer for the whole run
     ent_coef_start = cfg.ent_coef          # ent_coef anneals start -> ent_coef_final
     best_winrate = -1.0
+
+    # Resolve learner-slots specification once (used by every rollout below).
+    if args.learner_slots_mode == "rotate":
+        learner_slots_spec = ("rotate", args.slot_rotation_min,
+                               args.slot_rotation_max)
+    else:
+        learner_slots_spec = args.learner_slots_fixed
 
     from tqdm.auto import tqdm
     pbar = tqdm(range(1, args.total_updates + 1), desc="ppo")
@@ -611,10 +809,19 @@ def main():
         cfg.ent_coef = ent_coef_start + frac * (cfg.ent_coef_final - ent_coef_start)
         opponents = ladder.sample_opponents()
         buf, outcomes = collect_rollout_parallel(
-            actor, args.learner_slots, args.episodes_per_update,
+            actor, learner_slots_spec, args.episodes_per_update,
             seed0=random.randint(0, 2**30),
             opponent_members=opponents, reward_shaper=shaper,
-            pool=rollout_pool, num_workers=args.rollout_workers)
+            pool=rollout_pool, num_workers=args.rollout_workers,
+            use_sample_mix=True,
+            registry_kwargs={
+                "mix_weights": (args.opp_mix_league, args.opp_mix_random,
+                                args.opp_mix_noisy_scripted,
+                                args.opp_mix_raw_scripted),
+                "opp_eps_noise": args.opp_eps_noise,
+                "opp_neural_temperature": args.opp_neural_temperature,
+                "rng_seed": args.seed,
+            })
         # outcomes' Member objects are pickled COPIES returned from the
         # rollout worker processes — recording on them would never touch the
         # league's real Members, leaving every winrate a flat 0.5 (games==0)
@@ -630,27 +837,35 @@ def main():
 
         # Per-update progress: rung, mean env-default return per (episode,slot),
         # current policy loss, annealed entropy coefficient.
-        _n_ret = args.episodes_per_update * len(args.learner_slots)
-        _mean_return = float(buf.env_rewards.sum()) / max(1, _n_ret)
+        _n_runs = max(1, buf.size // EPISODE_LEN)
+        _mean_return = float(buf.env_rewards.sum()) / _n_runs
         pbar.set_postfix(rung=ladder.rung,
                          ret=f"{_mean_return:.1f}",
                          loss=f"{losses['policy_loss']:.3f}",
+                         ev=f"{losses['explained_variance']:+.2f}",
                          ent=f"{cfg.ent_coef:.3f}")
 
         if logger is not None:
-            # true env-default return, averaged per (episode, learner slot) —
-            # NOT the shaped buf.rewards (which the anti-idle shaper perturbs).
-            n_returns = args.episodes_per_update * len(args.learner_slots)
-            mean_return = float(buf.env_rewards.sum()) / max(1, n_returns)
+            n_returns = max(1, buf.size // EPISODE_LEN)
+            mean_return = float(buf.env_rewards.sum()) / n_returns
             metrics = {
                 "policy_loss": losses["policy_loss"],
                 "value_loss": losses["value_loss"],
                 "entropy": losses["entropy"],
+                "explained_variance": losses["explained_variance"],
+                "approx_kl": losses["approx_kl"],
+                "clipfrac": losses["clipfrac"],
+                "advantage_mean": losses["advantage_mean"],
+                "advantage_std": losses["advantage_std"],
                 "mean_return": mean_return,
                 "rung": ladder.rung,
                 "pool_size": len(league.checkpoints()),
                 "anti_idle_coef": shaper.penalty * shaper._frac,
                 "ent_coef": cfg.ent_coef,
+                # actor / critic LRs visible for runs where the operator wants
+                # to track the optimizer's effective rates.
+                "actor_lr": cfg.learning_rate,
+                "critic_lr": cfg.critic_learning_rate,
             }
 
         if update % args.snapshot_every == 0:
@@ -666,7 +881,8 @@ def main():
             # evaluate on a frozen CPU copy — never move the training actor
             # (its optimizer state is pinned to `device`).
             eval_actor = copy.deepcopy(actor).to("cpu")
-            res = evaluate_policy(NeuralAgent(eval_actor, "learner"),
+            res = evaluate_policy(NeuralAgent(eval_actor, "learner",
+                                              temperature=0.001),
                                   opp_agents, list(range(args.eval_seeds)))
             print(f"update {update} rung {ladder.rung} "
                   f"winrate={res.win_rate:.2f} score={res.mean_score:.1f} "
@@ -691,7 +907,8 @@ def main():
                         os.path.join(VIZ_DIR, "leaderboard.csv"),
                         os.path.join(VIZ_DIR, f"leaderboard_u{update}.png"))
                     slot_agents = _build_viz_slot_agents(
-                        actor, args.learner_slots, opponents, update)
+                        actor, args.learner_slots_fixed,
+                        opponents, update)
                     render_episode(
                         slot_agents,
                         os.path.join(VIZ_DIR, f"replay_u{update}.mp4"),

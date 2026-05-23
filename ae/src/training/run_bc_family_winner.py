@@ -13,7 +13,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "src"))
+                                ".."))
 
 import torch
 
@@ -64,7 +64,7 @@ def main():
         flag = "PASS" if passed else "FAIL"
         print(f"BC GATE vs {teacher}: {flag}  {detail}", flush=True)
 
-    out = os.path.join(here, "..", "src", "policy_family_winner_bc.pt")
+    out = os.path.join(here, "..", "policy_family_winner_bc.pt")
     actor.save_checkpoint(out)
     print(f"saved {out}  [{time.time() - t0:.0f}s]", flush=True)
 
