@@ -2,10 +2,10 @@ from postprocess.pipeline import make_pipeline
 
 
 def test_pipeline_applies_enabled_correctors_in_fixed_order():
-    # numbers first ("3"->"three"), then spelling_norm ("centre"->"center"),
-    # then disfluency ("the the"->"the").
+    # numbers first ("3"->"three"), then spelling_norm (now identity — no
+    # rules survived pruning), then disfluency ("the the"->"the").
     pipe = make_pipeline(["numbers", "spelling_norm", "disfluency"])
-    assert pipe("the the centre 3") == "the center three"
+    assert pipe("the the centre 3") == "the centre three"
 
 
 def test_empty_pipeline_is_identity():
@@ -19,8 +19,9 @@ def test_only_numbers_enabled():
 
 
 def test_only_spelling_norm_enabled():
+    # spelling_norm is now identity (all rules pruned — fired 0 clips on bench)
     pipe = make_pipeline(["spelling_norm"])
-    assert pipe("the the centre 3") == "the the center 3"
+    assert pipe("the the centre 3") == "the the centre 3"
 
 
 def test_only_disfluency_enabled():

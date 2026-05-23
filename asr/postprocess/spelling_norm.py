@@ -12,19 +12,11 @@ and individually covered by tests.
 import re
 
 RULES: dict[str, str] = {
-    "harbour": "harbor", "harbours": "harbors",
-    "centre": "center", "centres": "centers",
-    "centred": "centered", "centring": "centering",
-    "defence": "defense", "defences": "defenses",
-    "theatre": "theater", "theatres": "theaters",
-    "optimise": "optimize", "optimised": "optimized",
-    "optimising": "optimizing",
-    "analyse": "analyze", "analysed": "analyzed",
-    "analysing": "analyzing",
-    "organise": "organize", "organised": "organized",
-    "organising": "organizing",
-    "recognise": "recognize", "recognised": "recognized",
-    "recognising": "recognizing",
+    # All 22 candidate rules fired 0 clips on the 200-clip bench
+    # (parakeet_finetuned.nemo already emits AE spellings; BE variants never
+    # appeared in the transcribed hypotheses).  No rule had a positive or
+    # negative WER delta.  Per the bench-prune protocol the empty set is kept
+    # to stay minimal.
 }
 
 _WORD_RE = re.compile(r"[A-Za-z']+")
