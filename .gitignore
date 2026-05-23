@@ -182,6 +182,7 @@ logs/
 ae/training/viz/
 ae/training/tests/
 docs/
+wandb/
 
 # ASR fine-tune artifacts (large)
 asr/finetune/output/
