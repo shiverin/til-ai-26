@@ -66,11 +66,13 @@ def _wav_bytes() -> bytes:
 
 
 def test_predictions_pass_through_pipeline(monkeypatch):
+    # After the 200-clip bench (Task 10) pruned all spelling rules,
+    # spelling_norm is a no-op. This test still verifies numbers + disfluency
+    # fire end-to-end through the manager.
     _make_fake_nemo(monkeypatch, return_texts=[
-        "near the harbour gate",
-        "the the centre 3",
+        "near the 3 gate",
+        "the the signal 48",
     ])
-    # Force fresh import after mocking, then patch _ENABLED_PATH on that module.
     sys.modules.pop("asr_manager", None)
     import asr_manager
     _enabled_path_override(
@@ -79,8 +81,8 @@ def test_predictions_pass_through_pipeline(monkeypatch):
     mgr = asr_manager.ASRManager()
     out = mgr.asr_batch([_wav_bytes(), _wav_bytes()])
     assert out == [
-        "near the harbor gate",
-        "the center three",
+        "near the three gate",
+        "the signal forty eight",
     ]
 
 
