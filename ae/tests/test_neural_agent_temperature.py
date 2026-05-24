@@ -66,3 +66,19 @@ def test_high_temperature_diversifies():
     ag.reset()
     actions = {ag.action(obs) for _ in range(200)}
     assert len(actions) >= 2
+
+
+def test_neural_agent_accepts_cuda_actor():
+    """NeuralAgent.action must work with a CUDA-resident actor without the
+    caller having to .to('cpu')-copy first."""
+    import torch
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("CUDA not available")
+    actor = _make_actor_with_seed()
+    actor = actor.to("cuda")
+    obs = _first_obs()
+    ag = NeuralAgent(actor, name="x")
+    ag.reset()
+    a = ag.action(obs)
+    assert 0 <= a < 6

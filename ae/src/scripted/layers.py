@@ -42,6 +42,75 @@ def _openness(belief, danger, cell, radius):
     return len(seen)
 
 
+def _centre_prox(belief, cell):
+    """Approaches 1.0 at the geometric map centre, 0.0 at any corner.
+    Euclidean distance from ((gs-1)/2, (gs-1)/2) — the centre lies between
+    cells on an even grid, so no integer cell reaches 1.0 exactly; the four
+    cells nearest centre on a 16x16 board top out around 0.933. Matches the
+    env's radial respawn gradient in
+    `til_environment.arena.ArenaGenerator.generate_respawn_map`. Used as a
+    coarse proxy for centre tiles respawning ~4x faster than corners; the
+    env's Perlin component makes the proxy approximate but the underlying
+    gradient is purely geometric, so walls do not enter the calculation."""
+    gs = belief.prior.grid_size
+    cx = cy = (gs - 1) / 2.0
+    dx, dy = cell[0] - cx, cell[1] - cy
+    dist = (dx * dx + dy * dy) ** 0.5
+    max_dist = (2.0 * cx * cx) ** 0.5
+    return 1.0 - dist / max_dist
+
+
+def _enemy_distances(belief):
+    """Per-enemy 4-connected BFS distances from each visible (non-frozen)
+    enemy. Returns a list of dicts: one `dict[cell, int]` per enemy, where
+    each dict maps cells reachable from that specific enemy to tile-distance.
+    Empty list if no enemies are visible.
+
+    Facing-blind: every step is 1 tick, no turn cost. The env does not
+    expose enemy facing in the viewcone observation (see
+    `til_environment/observation.py` ViewChannel — ENEMY_AGENT presence
+    and ENEMY_AGENT_HEALTH only). Callers add `+0.5` for the expected
+    turn-cost adjustment when comparing against our own cost.
+
+    Per-enemy structure (vs. a single merged-min dict) lets callers count
+    how many enemies could individually beat us to a tile, so the
+    deflation can compound (`factor ** k`) for tiles contested by `k`
+    enemies — single-enemy contested tiles still get `factor`, but
+    overlapping tiles get progressively more aggressive deflation.
+
+    Walls and frozen enemies block. Danger cells do NOT block — enemies
+    are not deterred by their own teammates' bombs the way we model our
+    own avoidance. Same wall belief as our planner (live `wall_between`
+    minus `destroyed_walls`, via `belief.is_wall`)."""
+    sources = belief.live_enemies()
+    if not sources:
+        return []
+    gs = belief.prior.grid_size
+    blocked = set(belief.frozen_enemies)
+    result = []
+    for src in sources:
+        s = tuple(src)
+        if s in blocked:
+            continue
+        cost = {s: 0}
+        q = deque([s])
+        while q:
+            cell = q.popleft()
+            c = cost[cell]
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nb = (cell[0] + dx, cell[1] + dy)
+                if not (0 <= nb[0] < gs and 0 <= nb[1] < gs):
+                    continue
+                if nb in cost or nb in blocked:
+                    continue
+                if belief.is_wall(cell, nb):
+                    continue
+                cost[nb] = c + 1
+                q.append(nb)
+        result.append(cost)
+    return result
+
+
 def _strike_caveat(belief, danger, planner, loc, deadline, gs):
     """When the agent is in danger, see if a strike can still be fulfilled
     before fleeing. Returns the action to take (PLACE_BOMB or a movement) or
@@ -396,6 +465,131 @@ def forage(belief, danger, planner, params):
     return best_action if best_score > 0.0 else None
 
 
+def _bfs_facing(belief, danger, start):
+    """BFS in (cell, facing) state space, edges = 4 actions cost 1 each.
+
+    Returns (cost, parent). cost[(cell, facing)] = min ticks to reach that
+    state from `start`. parent[(cell, facing)] = (prev_state, action) so the
+    path to any state can be reconstructed by walking parent pointers back to
+    `start`. Blocked moves (walls / danger / off-grid / frozen enemies) follow
+    `_move_result`'s gating exactly. Turn actions (LEFT/RIGHT) traverse to a
+    new state (same cell, different facing) at cost 1 — so a plan that turns
+    twice before moving costs 2 more ticks than one that moves straight."""
+    cost = {start: 0}
+    parent = {}
+    q = deque([start])
+    while q:
+        s = q.popleft()
+        tile, facing = s
+        for action in FORAGE_MOVES:
+            result = _move_result(belief, danger, tile, facing, action)
+            if result is None:
+                continue
+            ns = result
+            if ns in cost:
+                continue
+            cost[ns] = cost[s] + 1
+            parent[ns] = (s, action)
+            q.append(ns)
+    return cost, parent
+
+
+def _trace_first_action(parent, start, target):
+    """Walk back through `parent` from `target` until the predecessor is
+    `start`; return the action on that first edge. Returns None when target
+    == start (the path is empty)."""
+    s = target
+    while s in parent:
+        prev, action = parent[s]
+        if prev == start:
+            return action
+        s = prev
+    return None
+
+
+def forage_chain(belief, danger, planner, params):
+    """Rate-maximizing facing-aware collector.
+
+    Same gating as `forage` (yields while a base lives unless
+    `params.forage_requires_endgame` is False; respects `camp_leash`).
+
+    Searches in (cell, facing) state space — turn actions cost a tick, so
+    plans that waste ticks turning have a higher path cost than direct
+    forward sweeps. Greedily chains collectibles: each iteration, BFS from
+    the chain's tail, then accept the candidate `c` with the highest
+    marginal rate `v_c / min_cost_to_c` provided it strictly beats the
+    chain's running average rate (first iteration is unconditional). Stops
+    when no candidate beats the average. Returns the first action of the
+    path to the first chained collectible, or None if no positive-rate
+    candidate exists (cascade falls through to sweep)."""
+    if params.forage_requires_endgame and belief.live_enemy_bases():
+        return None
+    remaining = belief.remaining_collectibles()
+    if params.camp_leash is not None:
+        base = belief.prior.our_base
+        remaining = {c: v for c, v in remaining.items()
+                     if chebyshev(c, base) <= params.camp_leash}
+    if not remaining:
+        return None
+
+    enemy_distances = _enemy_distances(belief)
+    start_state = (belief.location, belief.facing)
+    chained = set()
+    chain_value = 0.0
+    chain_cost = 0
+    first_action = None
+    current_state = start_state
+
+    while True:
+        cost, parent = _bfs_facing(belief, danger, current_state)
+
+        best_c = None
+        best_cost = 0
+        best_facing = 0
+        best_rate = 0.0
+        for c, v in remaining.items():
+            if c in chained:
+                continue
+            min_cost = None
+            min_facing = None
+            for f in range(4):
+                state = (c, f)
+                if state in cost and (min_cost is None or cost[state] < min_cost):
+                    min_cost = cost[state]
+                    min_facing = f
+            if min_cost is None or min_cost == 0:
+                continue
+            boost = 1.0 + params.centre_value_weight * _centre_prox(belief, c)
+            k = sum(1 for ed in enemy_distances if (c in ed) and ed[c] + 0.5 < min_cost)
+            if k > 0:
+                boost *= params.contested_value_factor ** k
+            rate = (v * boost) / min_cost
+            if rate > best_rate:
+                best_rate = rate
+                best_c = c
+                best_cost = min_cost
+                best_facing = min_facing
+
+        if best_c is None:
+            break
+
+        if chain_cost > 0:
+            avg_rate = chain_value / chain_cost
+            if best_rate <= avg_rate:
+                break
+
+        if first_action is None:
+            first_action = _trace_first_action(parent, start_state,
+                                               (best_c, best_facing))
+
+        chained.add(best_c)
+        chain_value += remaining[best_c]
+        chain_cost += best_cost
+        current_state = (best_c, best_facing)
+
+    return first_action
+
+
 def sweep(belief, danger, planner, params):
     """Head for the best-value reachable collectible.
 
@@ -404,7 +598,9 @@ def sweep(belief, danger, planner, params):
     `bombs_needed + 1` Chebyshev of that base, so the agent accumulates bombs
     near the kill; else no leash. The drift gradient points at the target base.
 
-    score = value / (1 + dist) + a small gradient toward the target base.
+    score = value * centre_boost / (1 + dist) + a small gradient toward the
+    target base. `centre_boost = 1 + centre_value_weight * _centre_prox(cell)`
+    biases scoring toward central tiles (which respawn ~4x faster).
     """
     gs = belief.prior.grid_size
     target = _target_base(belief, planner, params)
@@ -433,6 +629,7 @@ def sweep(belief, danger, planner, params):
     _trace_decision(belief, "sweep", "leash", (leash_centre, leash_radius))
     _trace_decision(belief, "sweep", "remaining_count", len(remaining))
     _trace_decision(belief, "sweep", "allow_all", allow_all)
+    enemy_distances = _enemy_distances(belief)
     best, best_tile = -INF, None
     for cell, value in remaining.items():
         if not allow_all and cell not in resource_cells:
@@ -444,7 +641,11 @@ def sweep(belief, danger, planner, params):
         # d == 0: already on the tile (first_action would be None); d == INF: unreachable.
         if d == INF or d == 0:
             continue
-        score = value / (1.0 + d)
+        boost = 1.0 + params.centre_value_weight * _centre_prox(belief, cell)
+        k = sum(1 for ed in enemy_distances if (cell in ed) and ed[cell] + 0.5 < d)
+        if k > 0:
+            boost *= params.contested_value_factor ** k
+        score = (value * boost) / (1.0 + d)
         if target is not None:
             near = chebyshev(cell, target[0])
             score += params.sweep_base_gradient * (1.0 - near / gs)

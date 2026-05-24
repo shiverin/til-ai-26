@@ -449,3 +449,5 @@ def test_realised_yield_prunes_entries_outside_the_window():
     b.step = 55
     # window [45, 55] keeps only the step-50 entry: 5.0 / 10.
     assert b.realised_yield(window=10) == 5.0 / 10
+
+

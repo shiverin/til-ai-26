@@ -21,7 +21,7 @@ The training scripts auto-set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 Trains the actor against the scripted teacher via DAgger (3 rounds, 400 episodes total). Output: `ae/src/policy_transformer_bc.pt`.
 
 ```bash
-BC_TEACHER=balanced_extreme_opening $PY -m run_bc_transformer \
+BC_TEACHER=balanced_extreme_opening BC_WORKERS=6 $PY -m run_bc_transformer \
   2>&1 | tee src/training/logs/bc_$STAMP.log
 ```
 
@@ -33,6 +33,8 @@ Model size knobs (also env vars — defaults match the production checkpoint):
 |---|---|---|
 | `BC_TEACHER` | `balanced_extreme_opening` | scripted strategy used as labeler |
 | `BC_WORKERS` | `1` | parallel rollout workers for DAgger collection |
+| `BC_EPOCHS` | `10` | gradient epochs per DAgger round (lowered from 20 to cut late-epoch overfitting spikes) |
+| `BC_LR` | `3e-4` | Adam learning rate for BC training (lowered from 1e-3 — typical transformer LR) |
 | `TF_D_MODEL` | 64 | transformer width |
 | `TF_N_LAYERS` | 4 | transformer depth |
 | `TF_N_HEADS` | 4 | attention heads |
@@ -61,7 +63,7 @@ Frozen BC actor vs scripted-anchor opponents. Default 200 episodes × 4 workers.
 $PY -m collect_critic_data \
   --actor policy_transformer_bc.pt \
   --episodes 200 \
-  --workers 4 \
+  --workers 6 \
   --out logs/critic_pretrain_data.pt \
   2>&1 | tee src/training/logs/collect_critic_$STAMP.log
 ```
@@ -129,6 +131,27 @@ Metrics CSV/PNG dumps in `src/training/viz/` track every PPO update:
 | `clipfrac` | < 0.3 | how often the ratio gets clipped — high = PPO clip is active |
 | `eval_winrate` | rising rung-by-rung | the true performance signal |
 
+### Opponent diversification (random curriculum + new edge strategies)
+
+The PPO trainer now uses a **linear curriculum** on the random-opponent share: starts high (0.40) for robustness, tapers to low (0.15) as the league fills with frozen-checkpoint self-play opponents. The current value is visible in the tqdm postfix as `rnd=0.NN`.
+
+| Knob | Default | What |
+|---|---|---|
+| `--opp-mix-random-start` | `0.40` | random share at update 1 |
+| `--opp-mix-random-end` | `0.15` | random share at the final update |
+| `--opp-mix-noisy-scripted` | `0.15` | static fraction across the run |
+| `--opp-mix-raw-scripted` | `0.10` | static fraction across the run |
+
+The league share absorbs the slack — by the end of training it's ~0.60 (mostly your own past checkpoints + scripted anchors).
+
+Three new edge-case scripted opponents were added to the registry; the `League` picks them up automatically because anchors come from `STRATEGIES.keys()`:
+
+| Strategy | Layers | Purpose |
+|---|---|---|
+| `glass_cannon` | `(strike, default)` | pure rush — no survive check. Tests punishing reckless aggression. |
+| `pacifist` | `(survive, forage, sweep, hold)` | never attacks, just farms. Tests against passive grinders. |
+| `hunter_killer` | `(hunt, survive, default)` | aggressive enemy-agent bombing. Tests against opponents that prioritize kills over base damage. |
+
 ### Knobs you can pass to Stage 3
 
 These all map to `Args` fields in `train_selfplay.py` (tyro converts `slot_rotation_min` → `--slot-rotation-min` etc.):
@@ -139,7 +162,8 @@ These all map to `Args` fields in `train_selfplay.py` (tyro converts `slot_rotat
 | `--slot-rotation-min` / `--slot-rotation-max` | `1` / `3` | learner-subset size range |
 | `--opp-eps-noise` | `0.08` | ε on scripted opponents |
 | `--opp-neural-temperature` | `1.2` | T on neural opponents (eval/BC use 0.001) |
-| `--opp-mix-league` / `--opp-mix-random` / `--opp-mix-noisy-scripted` / `--opp-mix-raw-scripted` | `0.50/0.25/0.15/0.10` | per-slot opp kind probabilities |
+| `--opp-mix-random-start` / `--opp-mix-random-end` | `0.40` / `0.15` | random-share curriculum endpoints (league absorbs the slack) |
+| `--opp-mix-noisy-scripted` / `--opp-mix-raw-scripted` | `0.15` / `0.10` | static fractions; sum with random must be ≤ 1 |
 | `--anti-idle-penalty` | `0.05` | STAY penalty (annealed to 0) |
 | `--no-cuda` | (CUDA on) | force CPU |
 
@@ -185,6 +209,7 @@ BC_TEACHER=balanced_extreme_opening $PY -m run_bc_transformer ...
 | PPO returns flat zero (idle collapse) | actor lost the BC behavior | Verify `--bc-init` path; check `anti_idle_penalty` is non-zero |
 | `RuntimeError: shape '[N, 256, 85]' is invalid` | stale `policy_*.pt` from before the K=5 stack change | Re-run Stage 1 to regenerate the checkpoint |
 | Worker rollouts use wrong opponent mix | older bug (now fixed) where worker `OpponentRegistry` ignored Args knobs | Pull latest `train_selfplay.py` — `registry_kwargs` is threaded through |
+| `OSError: [Errno 24] Too many open files` during rollout-Pool startup | torch's default `file_descriptor` tensor-sharing opens one socket per tensor storage; high worker × episode counts exhaust fds | Fixed: `train_selfplay.py` / `collect_critic_data.py` now call `torch.multiprocessing.set_sharing_strategy("file_system")` at import. If you still hit it on a different entry point, add the same line, or `ulimit -n 65536` in your shell |
 
 ## Memory artifacts (per-run logs)
 
@@ -197,3 +222,15 @@ BC_TEACHER=balanced_extreme_opening $PY -m run_bc_transformer ...
 | `src/training/viz/metrics_u*.png` | per-update metric panel (auto every `viz_every` updates) |
 | `src/training/viz/replay_u*.mp4` | 200-step episode replay against the current opponents |
 | `src/training/viz/leaderboard_u*.png` | league win-rate snapshot |
+
+## Future extension — self-exploitation league (AlphaStar pattern)
+
+If the trained actor scores well in eval but you suspect it has blind spots versus opponents not represented in the current league, the next step is **adversarial league diversification**:
+
+1. At update ~500 (or after a desired-performance checkpoint), freeze the current actor as `policy_exploit_target.pt`.
+2. Spin up a SEPARATE PPO run with reward inverted (`-opponent_reward`) against the frozen target. Train for ~100 updates. This produces an "exploiter" that specifically counters the main agent's weaknesses.
+3. Add the exploiter to the main league pool. Resume main training; the actor must now beat the exploiter, forcing it to patch the blind spot.
+
+This is the AlphaStar / OpenAI Five recipe. Cost: ~3-4 hours additional engineering + the exploiter PPO run time. Worth doing only if you have a known-strong baseline actor first — adversarial league diversification has nothing to bite on if the main actor is still BC-equivalent. Defer until after a successful end-to-end training run.
+
+Implementation sketch (not yet built): would need a new `train_exploiter.py` that loads the frozen target as a fixed opponent in every rollout slot, runs PPO with negated rewards, and saves to a versioned checkpoint added to the league via `League.snapshot`.

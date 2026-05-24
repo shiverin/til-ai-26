@@ -23,6 +23,11 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import numpy as np
 import torch
 
+# Switch torch.multiprocessing's tensor-sharing strategy to filesystem-backed
+# (avoids "Too many open files" from per-tensor socket fds when the rollout
+# Pool transfers state_dicts to many worker processes).
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 # ae/src holds scripted/, policy.py; conftest.py adds it for tests, a
 # standalone run needs this too.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -168,7 +173,8 @@ def _new_buffer(n):
 
 def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                     opponent_members=None, reward_shaper=None,
-                    return_outcomes=False, use_sample_mix=False):
+                    return_outcomes=False, use_sample_mix=False,
+                    progress=False, log_prefix=None, log_every=5):
     """Roll out `num_episodes` episodes; collect transitions from every
     learner slot. Returns a RolloutBuffer, or (RolloutBuffer, outcomes) when
     return_outcomes=True.
@@ -205,7 +211,13 @@ def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
     total_written = 0
     outcomes = []
 
-    for ep in range(num_episodes):
+    import time as _time_for_logs
+    _log_t0 = _time_for_logs.time()
+    ep_iter = range(num_episodes)
+    if progress:
+        from tqdm.auto import tqdm
+        ep_iter = tqdm(ep_iter, desc="rollout episodes", unit="ep")
+    for ep in ep_iter:
         seed = seed0 + ep
         random.seed(seed)
         env.reset(seed=seed)
@@ -304,6 +316,19 @@ def collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                 continue   # not a league Member; no bookkeeping
             learner_won = learner_mean > ep_scores[s]
             outcomes.append((member, learner_won))
+
+        # Per-worker progress log: emit a status line every `log_every`
+        # episodes so multi-worker runs show interleaved progress in the
+        # shared stdout. Lightweight alternative to per-worker tqdm bars.
+        if log_prefix is not None and (ep + 1) % log_every == 0:
+            _elapsed = _time_for_logs.time() - _log_t0
+            print(f"[{log_prefix}] {ep + 1}/{num_episodes} eps "
+                  f"[{_elapsed:.0f}s, {_elapsed / (ep + 1):.1f}s/ep]",
+                  flush=True)
+    if log_prefix is not None:
+        _elapsed = _time_for_logs.time() - _log_t0
+        print(f"[{log_prefix}] DONE — {num_episodes} eps in "
+              f"{_elapsed:.0f}s", flush=True)
     env.close()
     if total_written < n_max:
         buf = _slice_buffer(buf, total_written)
@@ -346,7 +371,7 @@ def _concat_buffers(bufs):
 
 def _worker_rollout(state_dict, cfg, learner_slots, num_episodes, seed0,
                     opponent_members, reward_shaper, use_sample_mix,
-                    registry_kwargs=None):
+                    registry_kwargs=None, worker_id=None, log_every=5):
     """Pool-worker entry point: rebuild a SymbolicTransformerActor from the CPU
     `state_dict` and `cfg` supplied by the caller and run `num_episodes` episodes
     via the unchanged collect_rollout. Top-level + picklable so multiprocessing
@@ -374,10 +399,12 @@ def _worker_rollout(state_dict, cfg, learner_slots, num_episodes, seed0,
         registry = OpponentRegistry(league=League(), **rk)
     else:
         registry = OpponentRegistry(league=None)
+    log_prefix = f"worker {worker_id}" if worker_id is not None else None
     return collect_rollout(actor, registry, learner_slots, num_episodes, seed0,
                            opponent_members=opponent_members,
                            reward_shaper=reward_shaper, return_outcomes=True,
-                           use_sample_mix=use_sample_mix)
+                           use_sample_mix=use_sample_mix,
+                           log_prefix=log_prefix, log_every=log_every)
 
 
 def _worker_rollout_star(args):
@@ -406,7 +433,12 @@ def collect_rollout_parallel(actor, learner_slots, num_episodes, seed0,
 
     Returns (RolloutBuffer, outcomes)."""
     workers = max(1, min(num_workers, num_episodes))
-    n_chunks = num_episodes if progress else workers
+    # Always chunk by worker count (NOT by episode count). Old behaviour with
+    # progress=True dispatched one task per episode → state_dict pickled+sent
+    # `num_episodes` times → fd / RAM explosion at high episode counts.
+    # Per-chunk progress (workers tasks total) is enough granularity for an
+    # operator to see workers tick off as they complete.
+    n_chunks = workers
     base, extra = divmod(num_episodes, n_chunks)
     state_dict = {k: v.cpu() for k, v in actor.state_dict().items()}
     cfg = actor.cfg
@@ -417,13 +449,19 @@ def collect_rollout_parallel(actor, learner_slots, num_episodes, seed0,
         count = base + (1 if i < extra else 0)
         if count == 0:
             continue
+        # worker_id=i so each worker prints lines tagged "[worker i]".
+        # log_every defaults to 5 episodes per status line.
         tasks.append((state_dict, cfg, learner_slots, count, seed0 + offset,
-                      opponent_members, reward_shaper, use_sample_mix, rk))
+                      opponent_members, reward_shaper, use_sample_mix, rk,
+                      i, 5))
         offset += count
     if progress:
-        from tqdm.auto import tqdm
-        results = list(tqdm(pool.imap(_worker_rollout_star, tasks),
-                            total=len(tasks), desc="rollout episodes"))
+        # Each worker prints its own "[worker N] X/Y eps" status lines every 5
+        # episodes (see _worker_rollout / collect_rollout log_prefix). Skip the
+        # outer tqdm bar — it would interleave badly with worker stdout.
+        # imap_unordered keeps the dispatch lightweight (results return as
+        # workers finish, then we collect into a list).
+        results = list(pool.imap_unordered(_worker_rollout_star, tasks))
     else:
         results = pool.starmap(_worker_rollout, tasks)
     bufs = [buf for buf, _ in results]
@@ -473,17 +511,21 @@ import torch.optim as optim
 
 @dataclass
 class PPOConfig:
-    learning_rate: float = 1e-5      # KNOB — actor LR; critic uses critic_learning_rate
-    critic_learning_rate: float = 1e-4  # KNOB — 10× actor LR; bump to 3e-4 if explained_variance stalls < 0.3
+    # Tuned 2026-05-23 after a 20-update smoke against a deterministic BC clone
+    # showed approx_kl≈0.10 (target <0.02), clipfrac≈0.18, entropy≈0.16.
+    # Lower LR + fewer epochs cut policy drift per update; higher ent_coef with
+    # an anneal forces exploration off the BC-deterministic basin early.
+    learning_rate: float = 3e-6      # KNOB — actor LR (was 1e-5; cut to keep approx_kl < 0.03)
+    critic_learning_rate: float = 1e-4  # KNOB — critic LR (still ~33× actor LR; bump to 3e-4 if explained_variance stalls < 0.3)
     num_minibatches: int = 8         # KNOB — bumped from 4: 4 minibatches OOM'd
                                      # on a T4 (the 347-token transformer's
                                      # attention is [mb, h, T, T] per layer
                                      # per actor+critic; 4 -> mb=600 blew
                                      # 14GB, 16 -> mb=150 fits comfortably).
-    update_epochs: int = 4           # KNOB
+    update_epochs: int = 2           # KNOB (was 4) — halves per-update training pass + policy drift
     clip_coef: float = 0.2           # KNOB
-    ent_coef: float = 0.01           # KNOB — start value; annealed to ent_coef_final
-    ent_coef_final: float = 0.01     # KNOB — ent_coef linearly anneals to this by the last update
+    ent_coef: float = 0.05           # KNOB (was 0.01) — start value; annealed to ent_coef_final
+    ent_coef_final: float = 0.005    # KNOB (was 0.01) — ent_coef linearly anneals from 0.05 → 0.005
     vf_coef: float = 0.5             # KNOB
     max_grad_norm: float = 0.5       # KNOB
 
@@ -675,6 +717,28 @@ class RungLadder:
         return False
 
 
+def _interp_random_share(update, total_updates, start, end):
+    """Linear interp from `start` at update 1 to `end` at update total_updates.
+    Clamped at the endpoints. update is 1-indexed (matching main's pbar).
+    """
+    if total_updates <= 1:
+        return end
+    frac = min(1.0, max(0.0, (update - 1) / (total_updates - 1)))
+    return start + frac * (end - start)
+
+
+def _compute_mix(random_share, noisy_scripted_share, raw_scripted_share):
+    """Build a (league, random, noisy_scripted, raw_scripted) mix tuple where
+    the league bucket absorbs whatever's left after the other three. Clamps
+    the league share to a minimum of 1e-6 so league.sample_opponent never
+    receives a zero weight."""
+    league_share = max(1e-6,
+                       1.0 - random_share - noisy_scripted_share
+                       - raw_scripted_share)
+    return (league_share, random_share, noisy_scripted_share,
+            raw_scripted_share)
+
+
 def _build_viz_slot_agents(actor, learner_slots, opponents, update):
     """Build a render_episode slot_agents dict from the current matchup.
 
@@ -727,13 +791,18 @@ class Args:
     critic_init: str = "critic_pretrained.pt"
     seed: int = 1
     cuda: bool = True
-    # Robustness knobs
-    opp_eps_noise: float = 0.08               # KNOB: ε for NoisyScriptedAgent
-    opp_neural_temperature: float = 1.2       # KNOB: T for NeuralAgent opponents
-    opp_mix_league: float = 0.50              # KNOB: per-slot opp mix
-    opp_mix_random: float = 0.25              # KNOB
-    opp_mix_noisy_scripted: float = 0.15      # KNOB
-    opp_mix_raw_scripted: float = 0.10        # KNOB
+    # robustness knobs
+    opp_eps_noise: float = 0.08               # ε for NoisyScriptedAgent
+    opp_neural_temperature: float = 1.2       # T for NeuralAgent opponents
+    # Opponent-kind mix. random share follows a linear schedule from
+    # opp_mix_random_start at update 1 to opp_mix_random_end at update
+    # total_updates; the freed share goes to the league bucket. noisy_scripted
+    # and raw_scripted stay constant — they're baseline-coverage knobs, not
+    # robustness sliders.
+    opp_mix_random_start: float = 0.40        # random share at update 1 (high → robust)
+    opp_mix_random_end: float = 0.15          # random share at the final update
+    opp_mix_noisy_scripted: float = 0.15      # constant fraction
+    opp_mix_raw_scripted: float = 0.10        # constant fraction
 
 
 def main():
@@ -753,10 +822,14 @@ def main():
     os.makedirs(VIZ_DIR, exist_ok=True)
     logger = MetricsLogger(VIZ_DIR) if args.viz_every else None
 
-    # Created before the actor touches CUDA so the forked workers inherit a
-    # CUDA-free parent (workers do CPU-only inference). Pool size is capped at
+    # Use the SPAWN context — fork after torch / tqdm import deadlocks on
+    # Linux (the parent already has torch's threadpool + tqdm's monitor thread
+    # running by the time we hit this line, and Python's fork() doesn't carry
+    # over thread state cleanly). Spawn re-imports modules in each worker
+    # (~3-5s startup overhead) but is bulletproof. Pool size is capped at
     # episodes_per_update — no point spawning more workers than episodes.
-    rollout_pool = multiprocessing.Pool(
+    rollout_ctx = multiprocessing.get_context("spawn")
+    rollout_pool = rollout_ctx.Pool(
         min(args.rollout_workers, args.episodes_per_update))
     bc_path = os.path.join(src, args.bc_init)
     if os.path.exists(bc_path):
@@ -779,10 +852,14 @@ def main():
             print(f"critic_init {critic_path} not found — random critic")
 
     league = League()
+    # main-process registry — used only for the league-bookkeeping fix-up path
+    # (the rollout workers each build their own OpponentRegistry from
+    # registry_kwargs each update, with the live scheduled mix).
     registry = OpponentRegistry(
         league,
-        mix_weights=(args.opp_mix_league, args.opp_mix_random,
-                     args.opp_mix_noisy_scripted, args.opp_mix_raw_scripted),
+        mix_weights=_compute_mix(args.opp_mix_random_start,
+                                  args.opp_mix_noisy_scripted,
+                                  args.opp_mix_raw_scripted),
         opp_eps_noise=args.opp_eps_noise,
         opp_neural_temperature=args.opp_neural_temperature,
         rng=random.Random(args.seed),
@@ -808,6 +885,13 @@ def main():
         frac = (update - 1) / max(1, args.total_updates - 1)
         cfg.ent_coef = ent_coef_start + frac * (cfg.ent_coef_final - ent_coef_start)
         opponents = ladder.sample_opponents()
+        # Compute the SCHEDULED random share for this update; league share
+        # absorbs the slack.
+        random_share = _interp_random_share(
+            update, args.total_updates,
+            args.opp_mix_random_start, args.opp_mix_random_end)
+        current_mix = _compute_mix(random_share, args.opp_mix_noisy_scripted,
+                                    args.opp_mix_raw_scripted)
         buf, outcomes = collect_rollout_parallel(
             actor, learner_slots_spec, args.episodes_per_update,
             seed0=random.randint(0, 2**30),
@@ -815,12 +899,13 @@ def main():
             pool=rollout_pool, num_workers=args.rollout_workers,
             use_sample_mix=True,
             registry_kwargs={
-                "mix_weights": (args.opp_mix_league, args.opp_mix_random,
-                                args.opp_mix_noisy_scripted,
-                                args.opp_mix_raw_scripted),
+                "mix_weights": current_mix,
                 "opp_eps_noise": args.opp_eps_noise,
                 "opp_neural_temperature": args.opp_neural_temperature,
-                "rng_seed": args.seed,
+                # XOR the update index so workers per update get distinct
+                # RNG streams; otherwise they'd replay the same per-slot
+                # opponent picks every update.
+                "rng_seed": args.seed ^ update,
             })
         # outcomes' Member objects are pickled COPIES returned from the
         # rollout worker processes — recording on them would never touch the
@@ -843,6 +928,7 @@ def main():
                          ret=f"{_mean_return:.1f}",
                          loss=f"{losses['policy_loss']:.3f}",
                          ev=f"{losses['explained_variance']:+.2f}",
+                         rnd=f"{current_mix[1]:.2f}",
                          ent=f"{cfg.ent_coef:.3f}")
 
         if logger is not None:
@@ -866,6 +952,8 @@ def main():
                 # to track the optimizer's effective rates.
                 "actor_lr": cfg.learning_rate,
                 "critic_lr": cfg.critic_learning_rate,
+                "opp_mix_random": current_mix[1],
+                "opp_mix_league": current_mix[0],
             }
 
         if update % args.snapshot_every == 0:

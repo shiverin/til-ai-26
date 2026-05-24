@@ -141,3 +141,24 @@ def test_collect_dagger_dataset_custom_pool_rejects_parallel():
     with pytest.raises(ValueError, match="custom opponent_pool"):
         collect_dagger_dataset("balanced", None, 1.0, 2, [0, 1],
                                 opponent_pool=[RandomAgent], num_workers=2)
+
+
+def test_bc_gate_works_with_cuda_actor(tmp_path):
+    """bc_gate must not crash on a CUDA-resident actor (regression for the
+    R3 device-mismatch crash)."""
+    import torch
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("CUDA not available")
+    from bc import bc_gate
+    from policy import SymbolicTransformerActor
+    actor = SymbolicTransformerActor(d_model=16, n_layers=1, n_heads=2)
+    actor = actor.to("cuda")
+    # tiny seed list keeps the test bounded; we only care that bc_gate runs
+    # to completion without raising the device-mismatch error.
+    passed, detail = bc_gate(actor, "balanced_extreme_opening",
+                              seeds=list(range(2)), tolerance=1.0)
+    # don't assert on `passed` — a tiny random-init actor will fail the gate;
+    # the test is about not crashing.
+    assert "clone" in detail
+    assert "teacher" in detail

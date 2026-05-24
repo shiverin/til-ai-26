@@ -27,6 +27,13 @@ from policy import SymbolicTransformerActor
 
 TEACHER = os.environ.get("BC_TEACHER", "balanced_extreme_opening")
 NUM_WORKERS = int(os.environ.get("BC_WORKERS", 1))
+# 10 (vs original 20) — the dataset grows monotonically across DAgger rounds,
+# so each round already gets ~1.5× more gradient steps than the last; halving
+# epochs/round cuts the late-epoch overfitting spikes observed in long runs.
+EPOCHS = int(os.environ.get("BC_EPOCHS", 10))
+# 3e-4 (vs original 1e-3) — at near-zero training loss the 1e-3 LR was large
+# enough to cause loss spikes. 3e-4 is a more typical Adam LR for transformers.
+LR = float(os.environ.get("BC_LR", 3e-4))
 
 
 def _config_from_env():
@@ -48,6 +55,7 @@ def main():
     cfg = _config_from_env()
     print(f"BC teacher: {TEACHER}", flush=True)
     print(f"BC workers: {NUM_WORKERS}", flush=True)
+    print(f"BC epochs/round: {EPOCHS}  lr: {LR}", flush=True)
     print(f"transformer config: {cfg}", flush=True)
     actor = SymbolicTransformerActor(**cfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,7 +75,7 @@ def main():
                                 num_workers=NUM_WORKERS)
     print(f"  R1 dataset: {len(ds)} samples  [{time.time() - t0:.0f}s]",
           flush=True)
-    train_bc(actor, ds, epochs=20, verbose=True)
+    train_bc(actor, ds, epochs=EPOCHS, lr=LR, verbose=True)
     print(f"  R1 trained  [{time.time() - t0:.0f}s]", flush=True)
 
     # Rounds 2-3 — DAgger aggregation with the partially-trained actor.
@@ -82,18 +90,24 @@ def main():
         ds += more
         print(f"  dataset now {len(ds)} samples  [{time.time() - t0:.0f}s]",
               flush=True)
-        train_bc(actor, ds, epochs=20, verbose=True)
+        train_bc(actor, ds, epochs=EPOCHS, lr=LR, verbose=True)
         print(f"  R{rnd + 2} trained  [{time.time() - t0:.0f}s]", flush=True)
 
     print(f"FINAL dataset: {len(ds)} samples", flush=True)
 
-    passed, detail = bc_gate(actor, TEACHER)
-    print(f"BC GATE {'PASS' if passed else 'FAIL'}: {detail}", flush=True)
-
+    # Save BEFORE the gate so a gate-side crash (e.g. device mismatch, OOM)
+    # cannot lose the trained model.
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "..", "policy_transformer_bc.pt")
     actor.save_checkpoint(out)
     print(f"saved {out}  [total {time.time() - t0:.0f}s]", flush=True)
+
+    try:
+        passed, detail = bc_gate(actor, TEACHER)
+        print(f"BC GATE {'PASS' if passed else 'FAIL'}: {detail}", flush=True)
+    except Exception as e:
+        print(f"BC GATE crashed (model already saved): {type(e).__name__}: {e}",
+              flush=True)
 
 
 if __name__ == "__main__":

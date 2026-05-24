@@ -68,12 +68,14 @@ class NeuralAEManager:
 
     def __init__(self, onnx_path=None):
         import onnxruntime as ort
-        # features.py lives in ae/training; the finals container ships it next
-        # to ae/src on the path (the build copies both).
         from features import FeatureBuilder
         if onnx_path is None:
+            # Baked submission path: the smoke-trained model exported from
+            # policy_final.pt (20-update PPO from BC init). Swap this filename
+            # to ship a different model (e.g. "policy_bc.onnx" for the BC
+            # clone, or a freshly exported name after a longer training run).
             onnx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     "policy.onnx")
+                                     "policy_smoke.onnx")
         self.session = ort.InferenceSession(onnx_path)
         self.fb = FeatureBuilder()
 

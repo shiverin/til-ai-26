@@ -110,7 +110,11 @@ class GreedyAgent:
 class NeuralAgent:
     """A trained SymbolicTransformerActor. By default samples from a
     masked Categorical at temperature 1.0 (uniform over legal when logits
-    are flat); higher T → more random opponent for league diversity."""
+    are flat); higher T → more random opponent for league diversity.
+
+    Device-aware: input tensors are moved to the actor's device on every
+    call, so a CUDA-resident actor works without the caller having to
+    `.to('cpu')`-copy first."""
 
     def __init__(self, actor, name="neural", temperature=1.0):
         self.name = name
@@ -118,6 +122,8 @@ class NeuralAgent:
         self.actor.eval()
         self.fb = FeatureBuilder()
         self._t = float(temperature)
+        # Cache once; the actor's device shouldn't change after construction.
+        self._device = next(actor.parameters()).device
 
     def reset(self):
         self.fb = FeatureBuilder()
@@ -126,15 +132,16 @@ class NeuralAgent:
         grid, base_feats, raw_agent, raw_base, scalar = self.fb.build(
             observation)
         mask = np.asarray(observation["action_mask"], dtype=bool).reshape(-1)
+        d = self._device
         with torch.no_grad():
             logits = self.actor(
-                torch.from_numpy(grid).unsqueeze(0),
-                torch.from_numpy(base_feats).unsqueeze(0),
-                torch.from_numpy(raw_agent).unsqueeze(0),
-                torch.from_numpy(raw_base).unsqueeze(0),
-                torch.from_numpy(scalar).unsqueeze(0),
+                torch.from_numpy(grid).unsqueeze(0).to(d),
+                torch.from_numpy(base_feats).unsqueeze(0).to(d),
+                torch.from_numpy(raw_agent).unsqueeze(0).to(d),
+                torch.from_numpy(raw_base).unsqueeze(0).to(d),
+                torch.from_numpy(scalar).unsqueeze(0).to(d),
             )[0]
-        mask_t = torch.from_numpy(mask)
+        mask_t = torch.from_numpy(mask).to(d)
         scaled = torch.where(mask_t, logits / self._t,
                               torch.full_like(logits, -1e8))
         dist = torch.distributions.Categorical(logits=scaled)

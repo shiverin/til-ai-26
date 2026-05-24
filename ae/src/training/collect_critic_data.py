@@ -23,6 +23,14 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 
+# Switch torch.multiprocessing's tensor-sharing strategy to filesystem-backed
+# instead of the default file_descriptor strategy. The default opens one Unix
+# socket per shared-memory tensor storage; a state_dict with ~50 tensors × 200
+# concurrent tasks × N workers easily exhausts per-process or per-cgroup fd
+# caps, producing OSError: [Errno 24] Too many open files. file_system uses
+# named tempfiles instead — slower per-tensor but unbounded by fd limits.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 # ae/src holds scripted/, policy.py — needed before importing train_selfplay's
 # dependencies (it adds the path itself, but league/policy imports here race it).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -30,7 +38,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from league import League
 from policy import SymbolicTransformerActor
-from train_selfplay import EPISODE_LEN, collect_rollout_parallel
+from train_selfplay import (EPISODE_LEN, OpponentRegistry, collect_rollout,
+                              collect_rollout_parallel)
 
 
 def main():
@@ -54,22 +63,50 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     actor_path = os.path.join(here, "..", args.actor)
     actor = SymbolicTransformerActor.from_checkpoint(actor_path)
-    actor.eval()   # frozen — never updated; CPU-resident for the fork workers
+    actor.eval()   # frozen — never updated
     print(f"frozen actor loaded from {actor_path}")
 
     # fixed scripted opponent panel — the 6 strategy anchors, sampled per slot
     opponents = League().anchors()
 
     t0 = time.time()
-    pool = multiprocessing.Pool(min(args.workers, args.episodes))
-    try:
-        buf, _ = collect_rollout_parallel(
-            actor, tuple(args.learner_slots), args.episodes, seed0=args.seed,
-            opponent_members=opponents, reward_shaper=None,
-            pool=pool, num_workers=args.workers, progress=True)
-    finally:
-        pool.close()
-        pool.join()
+    if args.workers <= 1:
+        # Single-worker path: skip multiprocessing entirely. Run collect_rollout
+        # in-process with per-episode tqdm so the operator sees one tick every
+        # ~12s (one env episode). No Pool / spawn / state_dict marshalling.
+        # Move actor to CUDA when available — saves ~3-5 min on learner-slot
+        # inference. The scripted-opponent cascade still dominates wall time
+        # (it's pure CPU Python and can't be GPU-accelerated).
+        if torch.cuda.is_available():
+            actor = actor.to("cuda")
+            print(f"actor moved to cuda ({torch.cuda.get_device_name(0)}) "
+                  f"for faster learner-slot inference", flush=True)
+        print(f"single-worker mode: running {args.episodes} episodes "
+              f"in-process with per-episode progress...", flush=True)
+        registry = OpponentRegistry(league=League())
+        buf = collect_rollout(
+            actor, registry, tuple(args.learner_slots), args.episodes,
+            seed0=args.seed, opponent_members=opponents,
+            reward_shaper=None, progress=True)
+    else:
+        # Use spawn context — fork after torch / tqdm import (which load native
+        # threadpools and a monitor thread) deadlocks on Linux. Spawn re-imports
+        # modules in each worker (~3-5s extra startup) but is bulletproof.
+        ctx = multiprocessing.get_context("spawn")
+        pool = ctx.Pool(min(args.workers, args.episodes))
+        print(f"dispatching {args.episodes} episodes across {args.workers} "
+              f"workers (one task per worker chunk)...", flush=True)
+        try:
+            buf, _ = collect_rollout_parallel(
+                actor, tuple(args.learner_slots), args.episodes,
+                seed0=args.seed, opponent_members=opponents,
+                reward_shaper=None,
+                pool=pool, num_workers=args.workers, progress=True)
+        finally:
+            pool.close()
+            pool.join()
+    print(f"  collected {buf.size} transitions in "
+          f"{time.time() - t0:.0f}s", flush=True)
 
     out_path = os.path.join(here, args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

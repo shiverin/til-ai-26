@@ -26,9 +26,14 @@ def test_make_optimizer_has_two_param_groups_with_distinct_lrs():
     assert critic_group[0]["lr"] == cfg.critic_learning_rate
 
 
-def test_default_ratio_is_10x():
+def test_default_critic_lr_meaningfully_higher_than_actor():
+    """Critic LR must be at least 5× the actor LR (the whole point of the
+    split is that the critic stays close to its pretraining LR while the
+    actor moves cautiously). Exact ratio is tuned per smoke-run findings
+    (was 10× → 33× as of 2026-05-23 to keep approx_kl < 0.03)."""
     cfg = PPOConfig()
-    assert cfg.critic_learning_rate / cfg.learning_rate == 10.0
+    ratio = cfg.critic_learning_rate / cfg.learning_rate
+    assert ratio >= 5.0, f"critic_lr/actor_lr = {ratio:.1f}× — too close to actor"
 
 
 def _tiny_buffer(n=32):

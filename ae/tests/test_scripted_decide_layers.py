@@ -599,3 +599,441 @@ def test_survive_skips_a_valueless_flee_drop_while_bases_live():
     p = build_planner(b, danger)
     action = survive(b, danger, p, StrategyParams())
     assert action != 5                                    # no zero-value drop
+
+
+from scripted.layers import forage_chain
+
+
+def _chain_belief(collectibles, loc, facing=0, enemy_bases=(), dead_bases=(),
+                  grid_size=8, wall_between=None):
+    """Belief tailored for forage_chain tests. Reuses _base_prior with
+    explicit grid_size + wall_between control."""
+    prior = _base_prior(grid_size=grid_size, wall_between=wall_between,
+                        enemy_bases=list(enemy_bases))
+    prior.collectibles = dict(collectibles)
+    b = Belief()
+    b.prior = prior
+    b.destroyed_walls = set()
+    b.dead_bases = set(dead_bases)
+    b.collected = set()
+    b.enemy_base_health = {}
+    b.ally_bombs = {}
+    b.location = loc
+    b.facing = facing
+    b.step = 10
+    return b
+
+
+def test_forage_chain_inactive_while_a_base_lives():
+    b = _chain_belief({(3, 3): 5.0}, (2, 2), enemy_bases=[(5, 5)])
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) is None
+
+
+def test_forage_chain_respects_camp_leash():
+    """A high-value cell outside camp_leash radius is filtered out;
+    if the only in-leash cell is the agent's own (cost 0 -> unreachable
+    semantics for chain), the layer yields."""
+    # our_base = (0, 0); camp_leash = 1 limits chebyshev <= 1.
+    b = _chain_belief({(1, 1): 1.0, (4, 4): 100.0}, (1, 1), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    params = StrategyParams(camp_leash=1, forage_requires_endgame=False)
+    assert forage_chain(b, danger, p, params) is None
+
+
+def test_forage_chain_walks_toward_single_reachable_collectible():
+    """Single collectible one cell forward of agent (facing RIGHT)."""
+    b = _chain_belief({(3, 2): 5.0}, (2, 2), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) == 0  # FORWARD
+
+
+def test_forage_chain_prefers_forward_over_lateral_when_value_equal():
+    """Equal-value cells: one FORWARD (cost 1, no turn), one to the side
+    (cost 2 — turn + forward). Forward wins on rate (5/1 > 5/2)."""
+    # Facing RIGHT (=0) at (2, 2): FORWARD lands at (3,2); RIGHT-then-FORWARD
+    # lands at (2, 3); LEFT-then-FORWARD lands at (2, 1).
+    b = _chain_belief({(3, 2): 5.0, (2, 3): 5.0}, (2, 2), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) == 0  # FORWARD
+
+
+def test_forage_chain_stops_when_marginal_rate_below_running_average():
+    """Cells at (3,2) v=5 and (4,2) v=1 with agent at (2,2) facing RIGHT.
+    First chain step: (3,2) wins (rate 5 vs (4,2) rate 0.5).
+    Second step gate: marginal (4,2) rate from (3,2) = 1/1 = 1.0, current
+    chain avg = 5.0. 1.0 < 5.0 -> gate blocks, chain stops at length 1.
+    Returned first_action: FORWARD (toward (3,2))."""
+    b = _chain_belief({(3, 2): 5.0, (4, 2): 1.0}, (2, 2), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) == 0  # FORWARD
+
+
+def test_forage_chain_multi_cell_when_marginal_rate_beats_average():
+    """Cells (3,2) v=5 and (4,2) v=6, agent at (2,2) facing RIGHT.
+    First step: (3,2) rate 5 vs (4,2) rate 3 -> pick (3,2).
+    chain_value=5 chain_cost=1, avg=5.
+    Second step from (3,2): (4,2) cost 1, marginal 6/1 = 6 > 5 -> accept.
+    Both in chain. First action: FORWARD (toward closer cell (3,2))."""
+    b = _chain_belief({(3, 2): 5.0, (4, 2): 6.0}, (2, 2), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) == 0  # FORWARD
+
+
+def test_forage_chain_yields_when_no_collectibles_remain():
+    b = _chain_belief({}, (2, 2), facing=0)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) is None
+
+
+def test_forage_chain_yields_when_all_collectibles_unreachable():
+    """A single collectible at (3, 2) walled off on all four sides is
+    unreachable. forage_chain yields and falls through to sweep."""
+    target = (3, 2)
+    walls = {
+        frozenset({target, (4, 2)}): False,
+        frozenset({target, (2, 2)}): False,
+        frozenset({target, (3, 3)}): False,
+        frozenset({target, (3, 1)}): False,
+    }
+    b = _chain_belief({target: 5.0}, (2, 2), facing=0, wall_between=walls)
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert forage_chain(b, danger, p, StrategyParams()) is None
+
+
+def test_centre_prox_geometry():
+    """`_centre_prox` returns 1.0 at the geometric centre of a 16x16 board
+    and 0.0 at any corner, with the appropriate symmetry across both axes."""
+    from scripted.layers import _centre_prox
+
+    m = MapPrior.load()
+    m.identify_team((13, 9))
+    b = Belief()
+    b.reset(m)
+
+    # Corners: distance from ((gs-1)/2, (gs-1)/2) is maximal -> centre_prox == 0.
+    for corner in [(0, 0), (15, 0), (0, 15), (15, 15)]:
+        assert abs(_centre_prox(b, corner)) < 1e-9
+
+    # The four cells nearest the geometric centre (7.5, 7.5) on a 16x16 board
+    # all sit at Euclidean distance sqrt(0.5) -> the same centre_prox value,
+    # and that value is the maximum any cell can achieve (~0.933).
+    centres = [(7, 7), (7, 8), (8, 7), (8, 8)]
+    vals = [_centre_prox(b, c) for c in centres]
+    assert all(abs(v - vals[0]) < 1e-9 for v in vals)   # symmetry
+    assert vals[0] > 0.9                                  # near the max
+
+    # Mid-edge cell is between corner and centre.
+    assert 0.0 < _centre_prox(b, (0, 7)) < vals[0]
+
+
+def _sweep_belief(collectibles, loc, facing=0, dead_bases=(), grid_size=16,
+                  our_base=(0, 0)):
+    """Minimal belief for sweep/forage_chain tests on an arbitrary square
+    grid. No enemy bases (so `_target_base` returns None — sweep's leash
+    and base-gradient terms stay inert), no resource gating, no walls."""
+    class _Prior:
+        pass
+    prior = _Prior()
+    prior.grid_size = grid_size
+    prior.wall_between = {}
+    prior.collectibles = dict(collectibles)
+    prior.enemy_bases = []
+    prior.our_base = our_base
+    prior.resource_cells = None
+    b = Belief()
+    b.prior = prior
+    b.dead_bases = set(dead_bases)
+    b.location = loc
+    b.facing = facing
+    b.step = 10
+    return b
+
+
+def test_sweep_prefers_centre_when_boost_overrides_distance():
+    """Sweep wiring: at weight=0 the peripheral tile wins on raw
+    v/(1+d); at weight=1.0 the multiplicative boost flips the choice."""
+    # Agent at (4, 7) facing DIR_RIGHT (=0). Equal value v=5.0 at both
+    # collectibles; the central one is one tile farther:
+    #
+    #   peripheral (2, 7): 2 BACKWARDs at weighted cost 1.4 each = d_p = 2.8
+    #     centre_prox(2, 7) = 1 - sqrt(5.5^2 + 0.5^2) / sqrt(2 * 7.5^2)
+    #                       ~ 1 - 5.523 / 10.607 ~ 0.479
+    #     raw  v/(1+d) = 5 / 3.8 ~ 1.316
+    #     boost (W=1.0) = 1 + 1*0.479 = 1.479
+    #     boosted score = 5 * 1.479 / 3.8 ~ 1.946
+    #
+    #   central    (7, 7): 3 FORWARDs at weighted cost 1.0 each = d_c = 3.0
+    #     centre_prox(7, 7) = 1 - sqrt(0.5^2 + 0.5^2) / 10.607
+    #                       ~ 1 - 0.707 / 10.607 ~ 0.933
+    #     raw  v/(1+d) = 5 / 4.0 = 1.250
+    #     boost (W=1.0) = 1 + 1*0.933 = 1.933
+    #     boosted score = 5 * 1.933 / 4.0 ~ 2.416
+    #
+    # At weight=0: peripheral 1.316 > central 1.250 -> peripheral wins.
+    # At weight=1.0: peripheral 1.946 < central 2.416 -> central wins.
+    collectibles = {(2, 7): 5.0, (7, 7): 5.0}
+    b = _sweep_belief(collectibles, (4, 7))
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+
+    action_disabled = sweep(b, danger, p, StrategyParams(centre_value_weight=0.0))
+    action_enabled = sweep(b, danger, p, StrategyParams(centre_value_weight=1.0))
+
+    assert action_disabled is not None and action_enabled is not None
+    assert action_disabled != action_enabled, (
+        "centre bias did not change sweep's choice — wiring regression")
+    # Cheapest first action from (4, 7, DIR_RIGHT) to (2, 7) is BACKWARD
+    # (=1): 2 BACKWARDs at weighted 1.4 each (2.8) beats LEFT-LEFT-FORWARD-
+    # FORWARD (1+1+1+1=4.0). Cheapest first action to (7, 7) is FORWARD (=0).
+    assert action_disabled == 1     # BACKWARD toward (2, 7)
+    assert action_enabled == 0      # FORWARD toward (7, 7)
+
+
+def test_forage_chain_prefers_centre_when_boost_overrides_rate():
+    """forage_chain wiring: at weight=0 the higher-rate peripheral tile
+    wins; at weight=1.0 the boost flips the choice to the central tile."""
+    # Agent at (4, 7) facing DIR_RIGHT (0). forage_chain's BFS (`_bfs_facing`)
+    # counts every action (FORWARD/BACKWARD/LEFT/RIGHT) at cost 1 — unlike
+    # the planner, which weights BACKWARD at 1.4. Equal value v=5.0 at both:
+    #
+    #   peripheral (1, 7): 3 BACKWARDs at cost 1 each -> min_cost = 3
+    #     (LEFT-LEFT-FORWARD*3 = 5; 3 BACKWARDs is cheaper)
+    #     centre_prox(1, 7) ~ 0.385
+    #     raw rate v / min_cost = 5/3 ~ 1.667
+    #     boost (W=1) = 1.385 -> boosted rate = 5 * 1.385 / 3 ~ 2.308
+    #
+    #   central    (8, 7): 4 FORWARDs at cost 1 each -> min_cost = 4
+    #     centre_prox(8, 7) ~ 0.933
+    #     raw rate = 5/4 = 1.250
+    #     boost (W=1) = 1.933 -> boosted rate = 5 * 1.933 / 4 ~ 2.416
+    #
+    # At weight=0: peripheral 1.667 > central 1.250 -> peripheral wins.
+    # At weight=1.0: peripheral 2.308 < central 2.416 -> central wins.
+    collectibles = {(1, 7): 5.0, (8, 7): 5.0}
+    b = _sweep_belief(collectibles, (4, 7), facing=0)
+    # forage_chain requires endgame by default. `_sweep_belief` sets
+    # prior.enemy_bases = [], so live_enemy_bases() returns [], and the
+    # endgame gate passes.
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+
+    action_disabled = forage_chain(
+        b, danger, p, StrategyParams(centre_value_weight=0.0))
+    action_enabled = forage_chain(
+        b, danger, p, StrategyParams(centre_value_weight=1.0))
+
+    assert action_disabled is not None and action_enabled is not None
+    assert action_disabled != action_enabled, (
+        "centre bias did not change forage_chain's choice — wiring regression")
+    # First action from (4, 7, DIR_RIGHT) to (1, 7) via 3 BACKWARDs is
+    # BACKWARD (=1). To (8, 7) via 4 FORWARDs is FORWARD (=0).
+    assert action_disabled == 1     # BACKWARD toward (1, 7)
+    assert action_enabled == 0      # FORWARD toward (8, 7)
+
+
+def test_enemy_distances_per_enemy_bfs():
+    """`_enemy_distances` returns one BFS dict per visible non-frozen
+    enemy. Sources have cost 0 in their own dict; cells unreachable from
+    a given enemy don't appear in that enemy's dict. Walls block. Frozen
+    enemies are excluded entirely (no dict for them) and block their
+    cell as an obstacle. Empty `live_enemies()` returns an empty list."""
+    from scripted.layers import _enemy_distances
+
+    # Empty case: no enemies -> empty list.
+    b_empty = _sweep_belief({}, (4, 7))
+    assert _enemy_distances(b_empty) == []
+
+    # Two live enemies plus one frozen. The frozen enemy contributes no
+    # dict AND blocks its own cell so no other enemy's BFS can enter it.
+    b = _sweep_belief({}, (4, 7))
+    b.enemies = {(3, 3), (8, 8), (10, 10)}
+    b.frozen_enemies = {(10, 10)}
+    dists = _enemy_distances(b)
+    assert len(dists) == 2                       # one dict per live enemy
+    by_source = {min(d.keys(), key=lambda c: d[c]): d for d in dists}
+    # Each live enemy is a source with cost 0 in its own dict.
+    d_from_3_3 = next(d for d in dists if d.get((3, 3)) == 0)
+    d_from_8_8 = next(d for d in dists if d.get((8, 8)) == 0)
+    # From (3, 3) the cell (5, 5) is 4 steps away (2 + 2).
+    assert d_from_3_3[(5, 5)] == 4
+    # From (8, 8) the same cell is 6 steps away (3 + 3).
+    assert d_from_8_8[(5, 5)] == 6
+    # Frozen-blocked cell (10, 10) is in NO live enemy's reachable set.
+    assert (10, 10) not in d_from_3_3
+    assert (10, 10) not in d_from_8_8
+
+    # Wall blocks direct adjacency. Enemy at (5, 5) with a wall between
+    # (5, 5) and (5, 6) — BFS to (5, 6) must reroute via (4, 5) -> (4, 6)
+    # -> (5, 6), giving cost 3 instead of 1.
+    b_wall = _sweep_belief({}, (4, 7))
+    b_wall.prior.wall_between = {frozenset({(5, 5), (5, 6)}): False}
+    b_wall.enemies = {(5, 5)}
+    dists_wall = _enemy_distances(b_wall)
+    assert len(dists_wall) == 1
+    assert dists_wall[0][(5, 6)] == 3
+
+
+def test_sweep_deflates_contested_collectible():
+    """Sweep wiring: at contested_value_factor=1.0 (off), sweep picks the
+    contested tile (it's on the agent's facing axis and at equal weighted
+    distance). At contested_value_factor=0.1, the deflation flips the
+    choice to the uncontested tile."""
+    # centre_value_weight is forced to 0 to isolate the deflation signal.
+    # Agent at (4, 7) facing DIR_RIGHT (=0). Equal value v=5.0 at both:
+    #
+    #   contested   (6, 7): 2 FORWARDs from us -> planner d = 2.0
+    #     enemy at (6, 6) -> BFS cost to (6, 7) = 1 step
+    #     enemy_cost + 0.5 = 1.5 < 2.0 -> deflate when factor < 1.0
+    #
+    #   uncontested (4, 8): RIGHT turn + 1 FORWARD -> planner d = 2.0
+    #     enemy BFS cost to (4, 8) is 4 (path via (5,6)-(5,7)-(4,7)-(4,8))
+    #     enemy_cost + 0.5 = 4.5 > 2.0 -> never deflated
+    #
+    # Raw v/(1+d) ties at 5/3 ~ 1.667 for both. The dict literal inserts
+    # contested first; sweep's `if score > best` is strict, so at
+    # factor=1.0 the tie goes to the first-inserted (contested).
+    # At factor=0.1, contested boosted = 5 * 0.1 / 3 ~ 0.167 < 1.667;
+    # uncontested wins.
+    collectibles = {(6, 7): 5.0, (4, 8): 5.0}
+    b = _sweep_belief(collectibles, (4, 7))
+    b.enemies = {(6, 6)}
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+
+    action_off = sweep(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=1.0))
+    action_on = sweep(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=0.1))
+
+    assert action_off is not None and action_on is not None
+    assert action_off != action_on, (
+        "contested deflation did not change sweep's choice — wiring regression")
+    # Cheapest first action from (4, 7, DIR_RIGHT) to (6, 7) is FORWARD
+    # (=0): 2 FORWARDs at cost 1.0 each. To (4, 8) the cheapest is
+    # RIGHT (=3): turn to DIR_DOWN then 1 FORWARD = cost 2.0.
+    assert action_off == 0     # FORWARD toward contested (6, 7)
+    assert action_on == 3      # RIGHT toward uncontested (4, 8)
+
+
+def test_forage_chain_deflates_contested_collectible():
+    """forage_chain wiring: at contested_value_factor=1.0 (off), the chain
+    picks the contested tile (tied raw rate, first-inserted in the dict).
+    At contested_value_factor=0.1, the deflation flips the choice to the
+    uncontested tile."""
+    from scripted.layers import forage_chain
+
+    # centre_value_weight forced to 0 to isolate the deflation signal.
+    # Agent at (4, 7) facing DIR_RIGHT (=0). forage_chain's BFS counts
+    # every action at cost 1 — no BACKWARD penalty, turns cost 1.
+    #
+    #   contested   (6, 7): 2 FORWARDs in (cell, facing) BFS -> min_cost 2
+    #     enemy at (6, 6) -> BFS cost to (6, 7) = 1
+    #     enemy_cost + 0.5 = 1.5 < 2.0 -> deflate when factor < 1.0
+    #
+    #   uncontested (4, 8): RIGHT turn + 1 FORWARD -> min_cost 2 at
+    #     facing=DIR_DOWN. Enemy BFS cost to (4, 8) = 4.
+    #     enemy_cost + 0.5 = 4.5 > 2.0 -> never deflated
+    #
+    # Raw rates: both v/min_cost = 5/2 = 2.5 -> tie. Dict literal inserts
+    # contested first; forage_chain's `if rate > best_rate` is strict, so
+    # at factor=1.0 the tie goes to first-inserted (contested).
+    # At factor=0.1, contested rate = 5 * 0.1 / 2 = 0.25; uncontested rate
+    # stays 2.5 -> uncontested wins.
+    collectibles = {(6, 7): 5.0, (4, 8): 5.0}
+    b = _sweep_belief(collectibles, (4, 7), facing=0)
+    b.enemies = {(6, 6)}
+    # forage_chain requires endgame by default; _sweep_belief sets
+    # prior.enemy_bases = [] so live_enemy_bases() returns [].
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+
+    action_off = forage_chain(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=1.0))
+    action_on = forage_chain(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=0.1))
+
+    assert action_off is not None and action_on is not None
+    assert action_off != action_on, (
+        "contested deflation did not change forage_chain's choice — wiring regression")
+    # First action from (4, 7, DIR_RIGHT) to (6, 7) via 2 FORWARDs is
+    # FORWARD (=0). To (4, 8) via RIGHT-turn-then-FORWARD it is RIGHT (=3).
+    assert action_off == 0     # FORWARD toward contested (6, 7)
+    assert action_on == 3      # RIGHT toward uncontested (4, 8)
+
+
+def test_sweep_deflation_compounds_with_overlapping_enemies():
+    """When TWO enemies both beat us to the same tile, the deflation
+    multiplier is `factor ** 2`, not `factor`. The single-enemy case is
+    structurally unchanged (k=1 still gives factor^1 = factor) — this
+    test exercises only the compounding path."""
+    # centre_value_weight forced to 0 to isolate the deflation signal.
+    # Agent at (4, 7) facing DIR_RIGHT (=0). Two equal-value collectibles.
+    #
+    #   single-contest  (6, 7): 2 FORWARDs -> our weighted d = 2.0
+    #     enemy_A at (6, 6) reaches in 1 step; enemy_cost+0.5 = 1.5 < 2.0
+    #     enemy_B at (3, 0) reaches in (3 left + 7 down) = 10 steps;
+    #                                  enemy_cost+0.5 = 10.5 > 2.0 — does
+    #                                  NOT beat us. So k = 1 for this tile.
+    #     deflation: factor^1 = 0.5 at our test factor.
+    #
+    #   double-contest  (4, 8): RIGHT-turn + 1 FORWARD -> our weighted d = 2.0
+    #     enemy_A at (6, 6) reaches via (5,6)-(5,7)-(4,7)-(4,8) = 4;
+    #                                  enemy_cost+0.5 = 4.5 > 2.0 — does
+    #                                  NOT beat us via A. Need a closer enemy.
+    #
+    # Rethink positions so the double-contest tile actually has k=2:
+    #
+    # Put enemy_A at (4, 9) and enemy_B at (5, 8). Both are 1 step from
+    # (4, 8). enemy_cost+0.5 = 1.5 < our d=2.0 -> both beat us -> k=2.
+    # Distances from these enemies to (6, 7):
+    #   enemy_A (4, 9): 4 steps (down-left chain to (6, 7) needs +2 x, -2 y => 4)
+    #   enemy_B (5, 8): 2 steps ((5, 8) -> (5, 7) -> (6, 7) = 2);
+    #                            enemy_cost+0.5 = 2.5 > our d=2.0 -> doesn't
+    #                            beat us. enemy_A: 4+0.5=4.5 > 2.0 either.
+    # So (6, 7) has k=0 from these two enemies. We need a third for the
+    # single-contest tile. Add enemy_C at (6, 6) -> beats us to (6, 7)
+    # with cost 1+0.5=1.5 < 2.0 (k=1 for (6, 7)). enemy_C's distance to
+    # (4, 8) is 4 -> doesn't beat us there. So (4, 8) still has k=2.
+    #
+    # Final positions:
+    #   enemy_A = (4, 9), enemy_B = (5, 8), enemy_C = (6, 6)
+    #   (4, 8) contested by A and B (k=2) — factor^2 deflation
+    #   (6, 7) contested by C only (k=1) — factor deflation
+    #
+    # Use factor = 0.5 so the test math is easy to verify:
+    #   With centre_value_weight=0 and v=5.0 at both tiles, d=2.0 at both:
+    #     k=1 (single, (6, 7)): boost = 0.5 -> score = 5*0.5/3 ~ 0.833
+    #     k=2 (double, (4, 8)): boost = 0.25 -> score = 5*0.25/3 ~ 0.417
+    #   Single-contest tile (6, 7) wins. First action toward (6, 7) is
+    #   FORWARD (=0).
+    #
+    # For the comparison, also run with factor=1.0 (deflation off):
+    #   Both raw scores 5/3 ~ 1.667 (TIE). Dict literal inserts (4, 8)
+    #   first; sweep's `>` is strict so (4, 8) wins the tie at factor=1.0.
+    #   First action toward (4, 8) is RIGHT (=3).
+    collectibles = {(4, 8): 5.0, (6, 7): 5.0}
+    b = _sweep_belief(collectibles, (4, 7))
+    b.enemies = {(4, 9), (5, 8), (6, 6)}
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+
+    action_off = sweep(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=1.0))
+    action_on = sweep(b, danger, p, StrategyParams(
+        centre_value_weight=0.0, contested_value_factor=0.5))
+
+    assert action_off is not None and action_on is not None
+    # Off: (4, 8) wins by insertion order on tied raw score.
+    assert action_off == 3      # RIGHT toward (4, 8)
+    # On: (4, 8) is deflated factor^2 (k=2); (6, 7) is deflated factor^1
+    # (k=1). (6, 7)'s deflated score wins -> FORWARD toward (6, 7).
+    assert action_on == 0       # FORWARD toward (6, 7)

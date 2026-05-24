@@ -395,7 +395,11 @@ def bc_gate(actor, teacher_strategy="balanced_extreme_opening", seeds=None, tole
     if seeds is None:
         seeds = list(range(16))
     opponents = [RandomAgent() for _ in range(5)]
-    clone = evaluate_policy(NeuralAgent(actor, "bc_clone", temperature=0.001),
+    # Eval on a CPU copy so single-sample inference doesn't contend with the
+    # training-time GPU actor; mirrors train_selfplay's eval/viz pattern.
+    cpu_actor = copy.deepcopy(actor).to("cpu")
+    cpu_actor.eval()
+    clone = evaluate_policy(NeuralAgent(cpu_actor, "bc_clone", temperature=0.001),
                             opponents, seeds)
     teacher = evaluate_policy(ScriptedAgent(teacher_strategy), opponents, seeds)
     # relative gate — tolerate the clone scoring slightly under the teacher.
