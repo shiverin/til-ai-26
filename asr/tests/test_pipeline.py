@@ -34,3 +34,17 @@ def test_order_is_fixed_regardless_of_enabled_list_order():
     pipe_a = make_pipeline(["disfluency", "spelling_norm", "numbers"])
     pipe_b = make_pipeline(["numbers", "spelling_norm", "disfluency"])
     assert pipe_a("the the centre 3") == pipe_b("the the centre 3")
+
+
+def test_manual_corrections_enabled():
+    # numbers -> spelling_norm -> manual_corrections -> disfluency
+    pipe = make_pipeline(
+        ["numbers", "spelling_norm", "manual_corrections", "disfluency"])
+    # "sinite" -> "cyanite" (manual), "the the" -> "the" (disfluency),
+    # "3" -> "three" (numbers).
+    assert pipe("the the sinite 3 reserves") == "the cyanite three reserves"
+
+
+def test_only_manual_corrections_enabled():
+    pipe = make_pipeline(["manual_corrections"])
+    assert pipe("the sinite is depleted") == "the cyanite is depleted"

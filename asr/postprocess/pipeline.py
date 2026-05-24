@@ -2,13 +2,18 @@
 
 Execution order is fixed (independent of the caller's enabled-list ordering):
 numbers first (so spelling rules operate on words, not digit tokens), then
-spelling_norm, then disfluency (so collapsing isn't fooled by spelling variants
-of the same word).
+spelling_norm, then manual_corrections (curated mishearing fixes), then
+disfluency (so collapsing isn't fooled by spelling variants of the same word).
 """
 
-from postprocess import disfluency, numbers, spelling_norm
+from postprocess import (
+    disfluency,
+    manual_corrections,
+    numbers,
+    spelling_norm,
+)
 
-_ORDER = ["numbers", "spelling_norm", "disfluency"]
+_ORDER = ["numbers", "spelling_norm", "manual_corrections", "disfluency"]
 
 
 def make_pipeline(enabled):
@@ -21,6 +26,8 @@ def make_pipeline(enabled):
             steps.append(numbers.correct)
         elif name == "spelling_norm":
             steps.append(spelling_norm.correct)
+        elif name == "manual_corrections":
+            steps.append(manual_corrections.correct)
         elif name == "disfluency":
             steps.append(disfluency.correct)
 
