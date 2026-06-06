@@ -7,7 +7,7 @@
 import json
 import os
 
-from ae_manager import AEManager, NeuralAEManager
+from ae_manager import AEManager, HybridAEManager, NeuralAEManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
@@ -17,10 +17,12 @@ app = FastAPI()
 _mode = os.environ.get("AE_MODE", "scripted").lower()
 if _mode == "neural":
     manager = NeuralAEManager()
+elif _mode == "hybrid":
+    manager = HybridAEManager()
 elif _mode == "scripted":
     manager = AEManager()
 else:
-    raise ValueError(f"AE_MODE={_mode!r} must be 'scripted' or 'neural'")
+    raise ValueError(f"AE_MODE={_mode!r} must be 'scripted', 'neural', or 'hybrid'")
 
 
 @app.post("/ae")

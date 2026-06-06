@@ -31,6 +31,23 @@ def _record(belief, action, layer):
     return action
 
 
+def record_final_action(belief, action, source):
+    """Per-tick bookkeeping that decide.act applies around the chosen action,
+    extracted so the hybrid controller (which bypasses the cascade runner) keeps
+    the same state. Sets `belief.expected_location` (stuck-detection plumbing read
+    by body_block_resolve next tick), logs a PLACE_BOMB to `belief.own_bombs`, and
+    records `belief.last_layer = source`. Returns the action unchanged."""
+    if action == FORWARD:
+        dx, dy = MOVE[belief.facing]
+        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
+    elif action == BACKWARD:
+        dx, dy = MOVE[(belief.facing + 2) % 4]
+        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
+    else:
+        belief.expected_location = belief.location
+    return _record(belief, action, source)
+
+
 def _legal(action, mask):
     return action is not None and 0 <= action < len(mask) and mask[action] == 1
 
@@ -70,14 +87,4 @@ def act(belief, action_mask, strategy=None):
         if _legal(override, mask):
             chosen, source = override, f"gate:{gate.__name__}"
 
-    # Stuck-detection plumbing: store where we expect to be next tick.
-    if chosen == FORWARD:
-        dx, dy = MOVE[belief.facing]
-        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
-    elif chosen == BACKWARD:
-        dx, dy = MOVE[(belief.facing + 2) % 4]
-        belief.expected_location = (belief.location[0] + dx, belief.location[1] + dy)
-    else:
-        belief.expected_location = belief.location
-
-    return _record(belief, chosen, source)
+    return record_final_action(belief, chosen, source)

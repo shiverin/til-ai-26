@@ -33,13 +33,13 @@ class StrategyParams:
     vulture_hp_boost: float = 2.0      # ROI multiplier weight for a base's missing HP
     defend_radius: int = 4             # Chebyshev radius around our base that triggers defend
     trap_enabled: bool = True          # the trap layer self-disables when False
-    hunt_bomb_floor: int = 6           # while any enemy base lives, hunt holds fire below this
+    hunt_bomb_floor: int = 5           # while any enemy base lives, hunt holds fire below this
                                        # bomb count; with all bases dead the floor is ignored
     stuck_trigger_ticks: int = 2       # consecutive failed-move ticks before we declare stuck
-    stuck_blacklist_ttl: int = 10      # ticks a blacklisted tile remains a soft obstacle
+    stuck_blacklist_ttl: int = 8       # ticks a blacklisted tile remains a soft obstacle
     centre_value_weight: float = -0.4   # multiplicative centre-bias on collectible value
                                        # (0.0 disables; tile_value *= 1 + w * centre_prox)
-    contested_value_factor: float = 0.2   # multiplicative deflation on a collectible's
+    contested_value_factor: float = 1.0   # multiplicative deflation on a collectible's
                                           # value when a visible enemy can reach it before
                                           # us (1.0 disables; 0.0 hard-ignores the tile)
 
@@ -92,11 +92,17 @@ STRATEGIES = {
         "adaptive",
         (survive, rush_roi, trap, forage_loop, sweep, default),
         _DEFAULT),
-    "balanced_extreme_opening": Strategy(
+    "balanced_extreme_opening": Strategy( # USE THIS
         "balanced_extreme_opening",
         (hunt, strike, survive, forage_chain, sweep, default),
         _DEFAULT,
         gates=(body_block_resolve, scripted_opening),
+    ),
+    "balanced_opening": Strategy(
+        "balanced_opening",
+        (survive, hunt, strike, forage_chain, sweep, default),
+        _DEFAULT,
+        gates=(), #body_block_resolve, scripted_opening),
     ),
     "glass_cannon": Strategy(
         "glass_cannon", (strike, default), _DEFAULT),

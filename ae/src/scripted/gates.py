@@ -14,7 +14,7 @@ until our bomb explodes", etc.).
 from scripted.belief import _trace_decision
 from scripted.blast import bomb_reaches
 from scripted.geometry import BACKWARD, FORWARD, MOVE, PLACE_BOMB, RIGHT
-from scripted.layers import sweep
+from scripted.layers import sweep, _base_doomed
 from scripted.pathfind import BOMB_TIMER, build_planner
 
 
@@ -88,11 +88,20 @@ def body_block_resolve(belief, danger, planner, params, action):
     if belief.stuck_ticks < params.stuck_trigger_ticks:
         return None
 
-    # Add the front tile to the blacklist for future-tick planning.
-    fx, fy = MOVE[belief.facing]
-    front = (belief.location[0] + fx, belief.location[1] + fy)
-    belief.stuck_blacklist[front] = belief.step + params.stuck_blacklist_ttl
-    _trace_decision(belief, "body_block_resolve", "blacklisted", front)
+    # Blacklist the tile we actually tried to enter. stuck_ticks only
+    # increments on intended moves (FORWARD/BACKWARD where the new location
+    # didn't match `expected_location`), so `expected_location` is the cell
+    # the move was blocked from entering — could be ahead OR behind. The
+    # original `loc + facing` only matched the FORWARD case and mis-blamed
+    # the wrong tile when a BACKWARD step got body-blocked. Fall back to the
+    # forward tile if `expected_location` is unset or equal to `location`
+    # (e.g. first tick / non-move actions).
+    expected = belief.expected_location
+    if expected is None or expected == belief.location:
+        fx, fy = MOVE[belief.facing]
+        expected = (belief.location[0] + fx, belief.location[1] + fy)
+    belief.stuck_blacklist[expected] = belief.step + params.stuck_blacklist_ttl
+    _trace_decision(belief, "body_block_resolve", "blacklisted", expected)
 
     # Don't override survive — it knows about danger we may not.
     if belief.last_layer == "survive":
@@ -126,3 +135,27 @@ def sweep_while_own_bomb(belief, danger, planner, params, action):
     if not belief.own_bombs:
         return None
     return sweep(belief, danger, planner, params)
+
+
+def strike_gate(belief, danger, planner, params, action):
+    """Narrow tactical override: if the actor proposed a non-bomb action while in
+    bomb range of a live, non-doomed enemy base (and we hold a bomb), place it.
+
+    No own-bomb escape check — friendly fire is OFF (an agent takes zero damage
+    from its own bombs), so a base hit carries no self-harm and an escape gate
+    would only veto value. Range is the real `bomb_reaches` primitive
+    (Chebyshev-2 + LOS), not literal adjacency. When several bases are hit the
+    action is still just PLACE_BOMB; the hit set is trace-only diagnostics, not a
+    target selection.
+    """
+    if action == PLACE_BOMB:
+        return None                      # cascade already chose a bomb; nothing to add
+    if belief.team_bombs < 1:
+        return None
+    targets = [base for base in belief.live_enemy_bases()
+               if bomb_reaches(belief.location, base, belief)
+               and not _base_doomed(belief, base)]
+    if not targets:
+        return None
+    _trace_decision(belief, "strike_gate", "hit_bases", tuple(sorted(targets)))
+    return PLACE_BOMB

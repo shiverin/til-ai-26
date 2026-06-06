@@ -37,7 +37,7 @@ P_COLLECT = 8       # summed collectible reward value per tile, normalized
 
 # --- scalar vector indices ---
 SC_HEALTH = 0       # self health / MAX_HEALTH
-SC_FROZEN = 1       # self frozen_ticks / FREEZE_DURATION
+SC_FROZEN = 1       # self frozen_ticks / FROZEN_TICKS_NORM (clipped to [0, 1])
 SC_RESOURCES = 2    # team_resources / RESOURCE_SCALE
 SC_BOMBS = 3        # team_bombs / BOMB_SCALE
 SC_STEP = 4         # step / NUM_ITERS
@@ -45,7 +45,12 @@ SC_TEAM = 5         # team / num_teams
 
 MAX_HEALTH = 60.0
 BASE_MAX_HEALTH = 100.0
-FREEZE_DURATION = 10.0
+# Normalizer for the SC_FROZEN scalar — a free choice, NOT the env's
+# `freeze_turns`. env.freeze_turns=3 caps `frozen_ticks` at 3, so a /3.0 norm
+# saturates exactly when frozen; /10.0 compresses to [0, 0.3] with headroom
+# (and matches the value used in the pretrained critic checkpoint). Don't
+# read this as "the freeze duration".
+FROZEN_TICKS_NORM = 10.0
 BOMB_FUSE = 4.0
 NUM_ITERS = 200.0
 RESOURCE_SCALE = 5.0
@@ -146,7 +151,7 @@ def encode_global_state(dynamics, slot, step):
     n_teams = max(1, dynamics.num_teams)
     scalars = np.zeros(STATE_SCALARS, np.float32)
     scalars[SC_HEALTH] = self_ent.health / MAX_HEALTH
-    scalars[SC_FROZEN] = min(self_ent.frozen_ticks / FREEZE_DURATION, 1.0)
+    scalars[SC_FROZEN] = min(self_ent.frozen_ticks / FROZEN_TICKS_NORM, 1.0)
     scalars[SC_RESOURCES] = min(res / RESOURCE_SCALE, 1.0)
     scalars[SC_BOMBS] = min(bombs / BOMB_SCALE, 1.0)
     scalars[SC_STEP] = step / NUM_ITERS

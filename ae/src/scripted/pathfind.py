@@ -57,6 +57,29 @@ class Planner:
         self._tile_best = tile_best
         self._tile_goal = tile_goal
 
+        # Survival aggregates for the forced-escape floor (Plan 2). `phase`
+        # saturates at T_MAX (the hazard-free tail), so a reachable state at
+        # phase T_MAX means the agent stayed non-lethal until every known enemy
+        # bomb had detonated. `_deepest_*` describe the deepest reachable phase
+        # frontier (where a non-survivor ultimately dies).
+        max_phase = 0
+        reached_tail = False
+        deepest_tiles = set()
+        deepest_cost = INF
+        for (t, _f, ph), cc in cost.items():
+            if ph > max_phase:
+                max_phase, deepest_tiles, deepest_cost = ph, {t}, cc
+            elif ph == max_phase:
+                deepest_tiles.add(t)
+                if cc < deepest_cost:
+                    deepest_cost = cc
+            if ph == T_MAX:
+                reached_tail = True
+        self._max_phase = max_phase
+        self._reached_tail = reached_tail
+        self._deepest_tiles = deepest_tiles
+        self._deepest_cost = deepest_cost
+
     def dist_to(self, tile):
         """Earliest weighted arrival cost at `tile` in any facing (INF if
         unreachable). FORWARD/LEFT/RIGHT/STAY weigh 1.0, BACKWARD weighs
@@ -79,6 +102,28 @@ class Planner:
         while s != self._start:
             s, action = self._prev[s]
         return action
+
+    def has_safe_continuation(self):
+        """True iff some reachable state reaches the hazard-free tail (phase
+        T_MAX) — i.e. the agent can stay non-lethal until every known enemy bomb
+        has detonated. Meaningful for a planner built with `forced_first_action`
+        (the forced-escape floor)."""
+        return self._reached_tail
+
+    def survival_score(self, danger):
+        """Lexicographic survival quality of this (forced-first-action) plan;
+        higher is better:
+            (survives, deepest_non_lethal_phase, -min_overlap_at_frontier,
+             -weighted_route_cost_to_frontier)
+        WHETHER to intervene is decided on the survival prefix `[:3]` only; the
+        cost slot is for CHOOSING among actions once intervention is decided
+        (all survivors tie on `[:3]`)."""
+        # Survivors always reach phase T_MAX, which is past every hazard, so their
+        # frontier tiles have overlap 0 — hence all survivors tie on slots 1-2 and
+        # the floor's `[:3]`-prefix compare never separates them.
+        min_overlap = min((danger.overlap(t) for t in self._deepest_tiles), default=0)
+        survives = 1 if self._reached_tail else 0
+        return (survives, self._max_phase, -min_overlap, -self._deepest_cost)
 
 
 def _wall_open_ticks(belief, place_bomb_first):
@@ -114,7 +159,7 @@ def _edge_passable(belief, a, b, arrival_tick, open_ticks):
     return arrival_tick > open_ticks.get(pair, INF)      # destructible
 
 
-def build_planner(belief, danger, place_bomb_first=False):
+def build_planner(belief, danger, place_bomb_first=False, forced_first_action=None):
     """Dijkstra over (tile, facing, phase) from the agent's current state.
 
     `phase` = min(tick, T_MAX); states at phase T_MAX form the hazard-free
@@ -166,6 +211,30 @@ def build_planner(belief, danger, place_bomb_first=False):
 
         if place_bomb_first and state == start:
             relax(tile, facing, PLACE_BOMB)         # forced opening move
+            continue
+
+        if forced_first_action is not None and state == start:
+            # Force the FIRST action only; the planner then explores freely from
+            # the resulting state. Movement actions still obey bounds / frozen
+            # enemies / edge passability — a blocked forced move yields no
+            # successor (the agent "dies in place" for survival-scoring). The
+            # escape floor never forces PLACE_BOMB (the floor is bomb-free).
+            a = forced_first_action
+            if a == STAY:
+                relax(tile, facing, STAY)
+            elif a == LEFT:
+                relax(tile, (facing + 3) % 4, LEFT)
+            elif a == RIGHT:
+                relax(tile, (facing + 1) % 4, RIGHT)
+            elif a in (FORWARD, BACKWARD):
+                mdir = facing if a == FORWARD else (facing + 2) % 4
+                step = 1.0 if a == FORWARD else BACKWARD_COST
+                dx, dy = MOVE[mdir]
+                nb = (tile[0] + dx, tile[1] + dy)
+                if (0 <= nb[0] < gs and 0 <= nb[1] < gs
+                        and nb not in belief.frozen_enemies
+                        and _edge_passable(belief, tile, nb, nphase, open_ticks)):
+                    relax(nb, facing, a, step_cost=step + blacklist_surcharge(nb))
             continue
 
         # Turns and STAY keep the agent on `tile`.

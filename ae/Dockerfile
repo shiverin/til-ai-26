@@ -26,6 +26,7 @@ COPY src .
 # "neural" loads policy.onnx via NeuralAEManager.
 #   scripted — rule cascade (see AE_STRATEGY below for which one).
 #   neural   — trained BC clone served via ONNX (ignores AE_STRATEGY).
+#   hybrid   — scripted opener -> RL actor (ONNX) post-handover; needs AE_RL_ACTOR_PATH.
 # Override per build: docker build --build-arg AE_MODE=neural ...
 # Or per run:         docker run -e AE_MODE=neural ...
 #ARG AE_MODE=neural
@@ -41,6 +42,12 @@ ENV AE_MODE=${AE_MODE}
 # Ignored when AE_MODE=neural.
 ARG AE_STRATEGY=balanced_extreme_opening
 ENV AE_STRATEGY=${AE_STRATEGY}
+
+# When AE_MODE=hybrid, the server loads the trained RL actor from this baked
+# .onnx (exported via training/export_onnx.py and COPYed in with `COPY src .`).
+# A missing path is a FATAL startup error (no silent fallback).
+ARG AE_RL_ACTOR_PATH=/workspace/rl_actor.onnx
+ENV AE_RL_ACTOR_PATH=${AE_RL_ACTOR_PATH}
 
 # Starts your model server.
 CMD uvicorn ae_server:app --port 5005 --host 0.0.0.0

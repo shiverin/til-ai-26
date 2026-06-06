@@ -95,3 +95,30 @@ class NeuralAEManager:
         mask = np.asarray(observation["action_mask"], dtype=bool).reshape(-1)
         logits = np.where(mask, logits, -1e8)
         return int(np.argmax(logits))
+
+
+class HybridAEManager:
+    """Serves the hybrid post-opener agent: scripted opener until handover, then
+    the RL actor (ONNX) under the forced-escape floor + gates.
+
+    Loads the trained actor from AE_RL_ACTOR_PATH (a baked .onnx). A missing path
+    is a FATAL startup error — never silently degrade to scripted/default.
+    """
+
+    def __init__(self):
+        from features import FeatureBuilder
+        from hybrid_controller import HybridController, OnnxActorRuntime
+        from scripted.handover import HandoverTrigger
+        path = os.environ.get("AE_RL_ACTOR_PATH")
+        if not path or not os.path.exists(path):
+            raise RuntimeError(
+                "AE_MODE=hybrid requires AE_RL_ACTOR_PATH to point at an exported "
+                f"actor .onnx; got {path!r}")
+        actor = OnnxActorRuntime.from_path(path)
+        self.controller = HybridController(
+            actor, HandoverTrigger(), feature_builder=FeatureBuilder(),
+            forward_bias=0.0)
+
+    def ae(self, observation: dict) -> int:
+        action, _decision = self.controller.step(observation)
+        return action

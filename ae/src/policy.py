@@ -177,9 +177,15 @@ class SymbolicTransformerActor(nn.Module):
         return self.head(self.head_norm(x[:, 0]))             # CLS -> [N,6]
 
     def act(self, grid, base_feats, raw_agent, raw_base, scalar, mask,
-            action=None):
-        """Returns (action, log_prob, entropy); illegal actions masked out."""
+            action=None, logit_bias=None):
+        """Returns (action, log_prob, entropy); illegal actions masked out.
+
+        `logit_bias` (a [A] or [N,A] tensor, default None) is added to the raw
+        logits BEFORE the mask, so a biased illegal action stays illegal. Used by
+        the training-time forward-bias exploration aid; inert when None."""
         logits = self.forward(grid, base_feats, raw_agent, raw_base, scalar)
+        if logit_bias is not None:
+            logits = logits + logit_bias
         logits = torch.where(mask, logits, torch.full_like(logits, -1e8))
         dist = Categorical(logits=logits)
         if action is None:
