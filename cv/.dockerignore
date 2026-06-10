@@ -1,0 +1,14 @@
+finetune/
+archive/
+pretrained/
+research_assets/
+tests/
+conftest.py
+.venv/
+*.md
+src/weights/best_*.pt
+src/weights/*.onnx
+src/weights/*.onnx.data
+src/weights/*.engine
+.ultralytics/
+__pycache__/

@@ -1,0 +1,27 @@
+# Slim CV image — drops TensorRT/ONNX runtime tooling (saves ~15GB vs the
+# nvcr nightly base). Uses .pt inference directly. cv_manager.py falls back
+# to best.pt when best.engine is absent.
+
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+WORKDIR /workspace
+
+# OpenCV runtime libs (libGL for cv2, glib for ultralytics image ops)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get clean
+
+RUN pip install --no-cache-dir -U pip
+COPY requirements.slim.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+ && find /opt/conda -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true \
+ && find /opt/conda -name '*.pyc' -delete 2>/dev/null || true
+
+COPY src ./src
+
+CMD ["uvicorn", "src.cv_server:app", "--port", "5002", "--host", "0.0.0.0"]

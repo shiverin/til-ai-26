@@ -1,0 +1,16 @@
+# generated training artifacts
+finetune/data/
+finetune/runs/
+finetune/cam_out/
+# dev virtualenv
+.venv/
+# local secrets (WANDB_API_KEY etc.)
+.env
+# exported engines / onnx (built in-container, never committed)
+src/weights/*.engine
+src/weights/*.onnx
+# per-project ultralytics settings dir (isolates the shared global settings)
+.ultralytics/
+# python
+__pycache__/
+*.pyc

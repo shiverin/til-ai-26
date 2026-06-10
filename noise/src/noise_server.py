@@ -7,7 +7,7 @@
 import base64
 
 from fastapi import FastAPI, Request
-from noise_manager import NoiseManager
+from src.noise_manager import NoiseManager
 
 app = FastAPI()
 manager = NoiseManager()

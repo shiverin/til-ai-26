@@ -1,5 +1,6 @@
 # .gitignore tells Git not to track these files.
 .vscode
+.claude/
 
 
 # Large files like model weights, training data, and results should be ignored.
@@ -173,3 +174,29 @@ cython_debug/
 src/gcloud/*.json
 
 data
+logs/
+*.pt
+*.jpg
+*.png
+*.txt
+*.wav
+ae/training/viz/
+ae/training/tests/
+docs/
+wandb/
+
+# ASR fine-tune artifacts (large)
+asr/finetune/output/
+asr/finetune/hfcache/
+asr/models/*.nemo
+asr/models/encoder.trt
+asr/models/encoder.onnx
+asr/models/encoder_external.onnx
+
+# Generated experiment/model artifacts
+**/runs/
+**/.ultralytics/
+*.engine
+*.onnx
+*.onnx.data
+*.mp4

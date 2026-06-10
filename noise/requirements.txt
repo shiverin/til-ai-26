@@ -1,5 +1,12 @@
-# Dependencies for the CV container.
-
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 pillow
+numpy<2
+torch==2.4.1
+torchvision==0.19.1
+ultralytics==8.3.40
+scikit-image==0.24.0
+pytest==8.3.3
+tqdm
+httpx
+

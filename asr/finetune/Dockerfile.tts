@@ -1,0 +1,10 @@
+# Synthetic-data pipeline image: Kokoro-82M TTS + audiomentations, layered on
+# the ASR image (which already provides torch, nemo, soundfile, numpy).
+# Used CPU-only — espeak-ng supplies grapheme-to-phoneme for Kokoro.
+FROM nobrainnohack-asr:latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir kokoro misaki audiomentations librosa

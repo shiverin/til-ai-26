@@ -1,24 +1,26 @@
-# Dockerfile for building the noise image.
-
-
-# The base image, an example deep learning VM.
-# For a full list, see https://us-docker.pkg.dev/deeplearning-platform-release/gcr.io/
-# For info, see https://cloud.google.com/deep-learning-vm/docs/images#supported-frameworks
+# Dockerfile for the adversarial-noise image.
 FROM nvcr.io/nvidia/pytorch:25.11-py3
 
-# Configures settings for the image.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
 WORKDIR /workspace
 
-# Installs your dependencies.
+# cv2 is shipped in NGC base as opencv-python (not headless); install
+# system deps so it imports.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copies your source files.
-COPY src .
+COPY src ./src
+COPY weights ./weights
 
-# Starts your model server.
-CMD uvicorn noise_server:app --port 5003 --host 0.0.0.0
+# The finals grader runs `uvicorn noise_server:app` (top-level), so
+# noise_server must be importable without the `src.` prefix.
+ENV PYTHONPATH=/workspace:/workspace/src
+
+CMD ["uvicorn", "src.noise_server:app", "--port", "5003", "--host", "0.0.0.0"]
