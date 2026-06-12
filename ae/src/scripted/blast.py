@@ -121,3 +121,68 @@ def bomb_reaches(bomb_cell, target, belief, blast_radius=BLAST_RADIUS):
     if max(abs(tx - ox), abs(ty - oy)) > blast_radius:
         return False
     return _los_to_tile(ox, oy, tx, ty, belief)
+
+
+class _WallsOpenedView:
+    """Read-only belief view with `opened` walls treated as already destroyed.
+
+    Exposes exactly the surface the blast geometry reads — `prior`,
+    `destroyed_walls` and `is_wall` — so `bomb_reaches`/`walls_destroyed_by`
+    can be evaluated against a hypothetical future wall state without
+    mutating the real belief."""
+
+    def __init__(self, belief, opened):
+        self.prior = belief.prior
+        self.destroyed_walls = belief.destroyed_walls | opened
+
+    def is_wall(self, a, b):
+        pair = frozenset({tuple(a), tuple(b)})
+        if pair in self.destroyed_walls:
+            return False
+        return pair in self.prior.wall_between
+
+
+def breach_bombs_needed(bomb_cell, target, belief, max_bombs):
+    """Wall-opening bombs an agent must spend at `bomb_cell` before a bomb
+    placed there damages `target`.
+
+    Bombs placed on consecutive ticks detonate on consecutive ticks, so each
+    bomb's blast sees every wall its predecessors opened. Returns 0 when
+    `bomb_reaches` already holds, k <= max_bombs when k sequential bombs open
+    enough destructible walls that bomb k+1 gains line-of-sight, or None when
+    `target` is outside the blast radius, the blockage is indestructible, or
+    more than `max_bombs` openers would be needed."""
+    ox, oy = bomb_cell
+    tx, ty = target
+    if max(abs(tx - ox), abs(ty - oy)) > BLAST_RADIUS:
+        return None
+    view, opened = belief, set()
+    for k in range(max_bombs + 1):
+        if bomb_reaches(bomb_cell, target, view):
+            return k
+        new = walls_destroyed_by(bomb_cell, view)
+        if not new:
+            return None                  # fixpoint — LOS never opens
+        opened |= new
+        view = _WallsOpenedView(belief, opened)
+    return None
+
+
+def replay_blasts(bombs, target, belief):
+    """Walk in-flight bombs in detonation order; walls open as they blow.
+
+    `bombs` is an iterable of (cell, counts_for_damage) sorted by detonation
+    tick. Returns (hits, opened): how many counted bombs damage `target`
+    (a destructible wall opened by an earlier blast no longer blocks a later
+    one), and every wall pair the whole sequence opens. The plain per-bomb
+    `bomb_reaches` undercounts exactly the self-breach dump this enables —
+    openers at a tile without LOS, damaging bombs behind them."""
+    view, opened, hits = belief, set(), 0
+    for cell, counted in bombs:
+        if counted and bomb_reaches(cell, target, view):
+            hits += 1
+        new = walls_destroyed_by(cell, view)
+        if new:
+            opened |= new
+            view = _WallsOpenedView(belief, opened)
+    return hits, opened

@@ -6,7 +6,10 @@ import math
 from collections import deque
 
 from scripted.belief import _trace_decision
-from scripted.blast import BLAST_RADIUS, bomb_reaches
+from scripted.blast import (
+    BLAST_RADIUS, _WallsOpenedView, bomb_reaches, breach_bombs_needed,
+    replay_blasts,
+)
 from scripted.geometry import (
     BACKWARD, FORWARD, LEFT, MOVE, PLACE_BOMB, RIGHT, STAY, chebyshev,
 )
@@ -133,6 +136,19 @@ def _enemy_threat_penalty(belief, cell, factor):
         if bomb_reaches(e, cell, belief):
             penalty *= factor ** (BLAST_RADIUS + 1 - chebyshev(e, cell))
     return penalty
+
+
+def _visibility_penalty(belief, cell, factor):
+    """Multiplicative devaluation for a collectible the agent cannot currently
+    see — shrinks the forager's effective search space to loot it has eyes on
+    rather than chasing stale belief-prior tiles across the map.
+
+    `factor` (1.0 disables) is applied once when `cell` is not in
+    `belief.last_visible_cells`, the LOS-occluded set of cells the viewcone
+    folded this tick. A visible cell is unpenalised."""
+    if factor >= 1.0:
+        return 1.0
+    return factor if tuple(cell) not in belief.last_visible_cells else 1.0
 
 
 def _strike_caveat(belief, danger, planner, loc, deadline, gs):
@@ -297,17 +313,34 @@ def survive(belief, danger, planner, params):
     return planner.first_action(best_tile)
 
 
+def _bomb_sequence(belief):
+    """Every in-flight bomb (own + ally) as (cell, counts_for_damage), sorted
+    by detonation order.
+
+    Both `own_bombs` entries and `ally_bombs` values carry the same remaining
+    timer (phases until detonation from the current obs), so the timer IS the
+    detonation order. Only own bombs count for damage (ally damage stays
+    unaccounted, conservative — same as before), but EVERY blast opens walls
+    for the bombs behind it."""
+    seq = [(timer, tuple(cell), True) for cell, timer in belief.own_bombs]
+    seq += [(timer, tuple(cell), False)
+            for cell, timer in belief.ally_bombs.items()]
+    seq.sort(key=lambda entry: entry[0])
+    return [(cell, counted) for _, cell, counted in seq]
+
+
 def _effective_hp(belief, base):
     """Believed HP of `base` after the agent's own in-flight bombs land.
 
     Observed HP (last-seen ratio x BASE_MAX_HEALTH) minus BOMB_ATTACK per own
-    bomb whose blast reaches the base. Floored at 0. This is the true
-    remaining work — observed HP does not drop until a bomb's fuse expires.
-    A base never observed is assumed full (conservative — never skipped).
+    bomb whose blast reaches the base — replayed in detonation order, so an
+    own bomb behind a destructible wall counts once an earlier blast (ours or
+    an ally's) opens it. Floored at 0. This is the true remaining work —
+    observed HP does not drop until a bomb's fuse expires. A base never
+    observed is assumed full (conservative — never skipped).
     """
     observed = belief.enemy_base_health.get(base, 1.0) * BASE_MAX_HEALTH
-    in_flight = sum(1 for cell, _ in belief.own_bombs
-                    if bomb_reaches(cell, base, belief))
+    in_flight, _ = replay_blasts(_bomb_sequence(belief), base, belief)
     return max(0.0, observed - BOMB_ATTACK * in_flight)
 
 
@@ -315,6 +348,53 @@ def _base_doomed(belief, base):
     """True if the agent's own in-flight bombs already finish `base`, so
     another bomb on it would be wasted."""
     return _effective_hp(belief, base) <= 0.0
+
+
+def _strike_tiles(belief, base, params):
+    """tile -> wall-opening bombs needed (0 = direct LOS) for every tile from
+    which a bomb sequence can damage `base`.
+
+    Extends the classic hit-tile set with tiles whose line-of-sight is blocked
+    only by destructible walls: up to `params.los_breach_max` openers placed
+    there blow the walls, and the bombs behind them damage the base. A tile
+    needing k openers is offered only while `team_bombs >= k + 1`, so at least
+    one damaging bomb can follow. Walls that in-flight bombs (own or ally)
+    will open count as already gone — every bomb in the air detonates before
+    one placed this tick. Only the Chebyshev blast window around the base can
+    ever qualify, so the scan is 5x5, not grid-wide."""
+    _, opened = replay_blasts(_bomb_sequence(belief), base, belief)
+    view = _WallsOpenedView(belief, opened) if opened else belief
+    gs = belief.prior.grid_size
+    bx, by = base
+    out = {}
+    for x in range(max(0, bx - BLAST_RADIUS), min(gs, bx + BLAST_RADIUS + 1)):
+        for y in range(max(0, by - BLAST_RADIUS), min(gs, by + BLAST_RADIUS + 1)):
+            k = breach_bombs_needed((x, y), base, view, params.los_breach_max)
+            if k is not None and belief.team_bombs >= k + 1:
+                out[(x, y)] = k
+    return out
+
+
+def _walkable_direct_tile(belief, planner, tiles, max_walk):
+    """Nearest direct-LOS (zero-opener) strike tile worth walking to instead
+    of dumping opener bombs where we stand.
+
+    Qualifies when its planner arrival cost is strictly under `max_walk` AND
+    no visible live enemy stands on the route (an enemy body-blocking the
+    corridor would stall the walk — keep dumping instead; frozen enemies are
+    already planner-impassable). Returns the tile, or None."""
+    enemies = {tuple(e) for e in belief.live_enemies()}
+    best, best_tile = max_walk, None
+    for tile, k in tiles.items():
+        if k:
+            continue
+        d = planner.dist_to(tile)
+        if d >= best or d == 0:
+            continue
+        if enemies and enemies.intersection(planner.route_to(tile)):
+            continue
+        best, best_tile = d, tile
+    return best_tile
 
 
 def _target_base(belief, planner, params):
@@ -327,7 +407,6 @@ def _target_base(belief, planner, params):
     damaged base keeps the lowest bombs_needed, so the target is sticky.
     Returns None when no live, non-doomed base exists.
     """
-    gs = belief.prior.grid_size
     best_key, best = None, None
     for base in belief.live_enemy_bases():
         if _base_doomed(belief, base):
@@ -335,12 +414,10 @@ def _target_base(belief, planner, params):
         eff = _effective_hp(belief, base)
         bombs_needed = math.ceil(eff / BOMB_ATTACK)
         arrival = INF
-        for x in range(gs):
-            for y in range(gs):
-                if bomb_reaches((x, y), base, belief):
-                    d = planner.dist_to((x, y))
-                    if d < arrival:
-                        arrival = d
+        for tile, k in _strike_tiles(belief, base, params).items():
+            d = planner.dist_to(tile) + k
+            if d < arrival:
+                arrival = d
         score = bombs_needed + params.target_travel_weight * arrival
         key = (score, bombs_needed, arrival)
         if best_key is None or key < best_key:
@@ -358,13 +435,28 @@ def strike(belief, danger, planner, params):
     `BOMB_ATTACK * own_hits >= observed_hp` where `own_hits` counts our
     in-flight bombs whose blast reaches the base.
 
-    Once committed: bomb in direct range, else breach a wall toward the base
-    when that is strictly faster, else navigate to a hit-tile. A bomb hits a
-    base only within Chebyshev 2 AND with line-of-sight.
+    Once committed: bomb from the best strike tile, else breach a wall toward
+    the base when that is strictly faster, else navigate to a strike tile. A
+    strike tile either has direct line-of-sight within Chebyshev 2, or gains
+    it after up to `los_breach_max` of its own bombs open the destructible
+    walls in between (`_strike_tiles`) — the openers do no damage, the bombs
+    behind them do. Tile costs blend travel ticks with opener bombs (one
+    opener = one tick spent placing without damaging), so a k-opener tile
+    underfoot beats a direct tile k+1 ticks away.
+
+    Gives up entirely once `strike_dead_bases_cap` bases are observed dead
+    (our own base counts) — past that point the cascade forages/hunts.
     """
     _trace_decision(belief, "strike", "team_bombs", belief.team_bombs)
     if belief.team_bombs <= 0:
         _trace_decision(belief, "strike", "yield_no_bombs", True)
+        return None
+    # Endgame give-up: once enough bases are observed dead (ours included),
+    # razing another one no longer moves the result — yield every tick so the
+    # cascade spends the remaining bombs and ticks on hunt/forage instead.
+    dead = len(belief.dead_bases) + (1 if belief.base_health <= 0 else 0)
+    if params.strike_dead_bases_cap and dead >= params.strike_dead_bases_cap:
+        _trace_decision(belief, "strike", "yield_dead_bases_cap", dead)
         return None
     target = _target_base(belief, planner, params)
     _trace_decision(belief, "strike", "target", target)
@@ -373,8 +465,7 @@ def strike(belief, danger, planner, params):
         return None
     base, _, _ = target
 
-    own_hits = sum(1 for cell, _ in belief.own_bombs
-                   if bomb_reaches(cell, base, belief))
+    own_hits, _ = replay_blasts(_bomb_sequence(belief), base, belief)
     observed_hp = belief.enemy_base_health.get(base, 1.0) * BASE_MAX_HEALTH
     in_flight_damage = BOMB_ATTACK * own_hits
     _trace_decision(belief, "strike", "own_hits", own_hits)
@@ -384,48 +475,49 @@ def strike(belief, danger, planner, params):
         return None
 
     loc = belief.location
-    # 1. Direct hit from where we stand.
-    direct_hit = bomb_reaches(loc, base, belief)
-    _trace_decision(belief, "strike", "direct_hit", direct_hit)
-    if direct_hit:
+    tiles = _strike_tiles(belief, base, params)
+
+    def hit_cost(plan):
+        """Cheapest (arrival + openers, tile) over the strike tiles."""
+        best, best_tile = INF, None
+        for tile, k in tiles.items():
+            c = plan.dist_to(tile) + k
+            if c < best:
+                best, best_tile = c, tile
+        return best, best_tile
+
+    # 1. Bomb from where we stand — a direct hit (k=0), or the start of an
+    #    opener dump when no other tile is worth the walk.
+    t_a, best_tile = hit_cost(planner)
+    _trace_decision(belief, "strike", "hit_cost_no_breach", t_a)
+    k_here = tiles.get(loc)
+    _trace_decision(belief, "strike", "direct_hit", k_here == 0)
+    if k_here is not None and k_here <= t_a:
+        if k_here:
+            # Bombs are a team resource: before dumping openers, prefer a
+            # short walk to a no-breach tile — one < `direct_walk_max` ticks
+            # away with no visible enemy standing on the route.
+            direct = _walkable_direct_tile(belief, planner, tiles,
+                                           params.direct_walk_max)
+            if direct is not None:
+                _trace_decision(belief, "strike", "walk_over_breach", direct)
+                return planner.first_action(direct)
+            _trace_decision(belief, "strike", "los_breach_openers", k_here)
         return PLACE_BOMB
 
-    gs = belief.prior.grid_size
-
-    def hit_dist(plan):
-        """Earliest arrival tick at any tile that can bomb `base`."""
-        best = INF
-        for x in range(gs):
-            for y in range(gs):
-                if bomb_reaches((x, y), base, belief):
-                    d = plan.dist_to((x, y))
-                    if d < best:
-                        best = d
-        return best
-
-    # 2. Breach: dropping a bomb now opens a wall and reaches a hit-tile
+    # 2. Breach: dropping a bomb now opens a wall and reaches a strike tile
     #    strictly sooner.
-    t_a = hit_dist(planner)
-    _trace_decision(belief, "strike", "hit_dist_no_breach", t_a)
     if belief.team_bombs >= params.breach_min_bombs:
         bomb_planner = build_planner(belief, danger, place_bomb_first=True)
-        t_b = hit_dist(bomb_planner)
-        _trace_decision(belief, "strike", "hit_dist_with_breach", t_b)
+        t_b, _ = hit_cost(bomb_planner)
+        _trace_decision(belief, "strike", "hit_cost_with_breach", t_b)
         if t_b < t_a:
             _trace_decision(belief, "strike", "breach_now", True)
             return PLACE_BOMB
 
-    # 3. Navigate toward the nearest hit-tile (no breach).
-    best, best_tile = INF, None
-    for x in range(gs):
-        for y in range(gs):
-            if not bomb_reaches((x, y), base, belief):
-                continue
-            d = planner.dist_to((x, y))
-            if d < best:
-                best, best_tile = d, (x, y)
+    # 3. Navigate toward the cheapest strike tile (no breach).
     _trace_decision(belief, "strike", "nav_best_tile", best_tile)
-    if best_tile is None or best == INF:
+    if best_tile is None or t_a == INF:
         _trace_decision(belief, "strike", "yield_no_nav", True)
         return None
     return planner.first_action(best_tile)
@@ -588,6 +680,7 @@ def forage_chain(belief, danger, planner, params):
             if k > 0:
                 boost *= params.contested_value_factor ** k
             boost *= _enemy_threat_penalty(belief, c, params.enemy_avoid_factor)
+            boost *= _visibility_penalty(belief, c, params.unseen_value_factor)
             rate = (v * boost) / min_cost
             if rate > best_rate:
                 best_rate = rate
@@ -671,6 +764,7 @@ def sweep(belief, danger, planner, params):
         if k > 0:
             boost *= params.contested_value_factor ** k
         boost *= _enemy_threat_penalty(belief, cell, params.enemy_avoid_factor)
+        boost *= _visibility_penalty(belief, cell, params.unseen_value_factor)
         score = (value * boost) / (1.0 + d)
         if target is not None:
             near = chebyshev(cell, target[0])
@@ -739,7 +833,7 @@ def camp(belief, danger, planner, params):
 
 
 def hunt(belief, danger, planner, params):
-    """Opportunistically bomb enemy agents already in blast range.
+    """Drop one bomb on enemy agents in blast range, then move on.
 
     Bomb-conservation rule: while any enemy base is still alive, hunt holds
     fire unless `team_bombs >= params.hunt_bomb_floor`. A bomb spent on an
@@ -748,9 +842,12 @@ def hunt(belief, danger, planner, params):
     bases are dead the bomb pool has no other use, so hunt fires on any
     visible live enemy in blast range (subject to bombs in hand).
 
-    Counts only LIVE enemies the bomb would actually hit (LOS + Chebyshev 2);
-    frozen enemies are excluded. Our bomb is friendly-fire safe, so no escape
-    route is needed.
+    One bomb is enough: an enemy a bomb we ALREADY placed (still in flight)
+    would hit is skipped, so hunt does not re-bomb the same stationary enemy
+    tick after tick — the cascade falls through to movement once the bomb is
+    down. Counts only LIVE enemies the bomb would actually hit (LOS + Chebyshev
+    2); frozen enemies are excluded. Our bomb is friendly-fire safe, so no
+    escape route is needed.
 
     `danger`, `planner` are unused — kept for cascade-uniform layer typing.
     """
@@ -759,7 +856,10 @@ def hunt(belief, danger, planner, params):
         _trace_decision(belief, "hunt", "yield_no_bombs", True)
         return None
     loc = belief.location
-    hits = sum(1 for e in belief.live_enemies() if bomb_reaches(loc, e, belief))
+    hits = sum(1 for e in belief.live_enemies()
+               if bomb_reaches(loc, e, belief)
+               and not any(bomb_reaches(cell, e, belief)
+                           for cell, _ in belief.own_bombs))
     _trace_decision(belief, "hunt", "hits", hits)
     if hits == 0:
         _trace_decision(belief, "hunt", "yield_no_hits", True)

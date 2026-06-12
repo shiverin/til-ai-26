@@ -13,16 +13,26 @@ until our bomb explodes", etc.).
 """
 from scripted.belief import _trace_decision
 from scripted.blast import bomb_reaches
-from scripted.geometry import BACKWARD, FORWARD, MOVE, PLACE_BOMB, RIGHT
-from scripted.layers import sweep, _base_doomed
+from scripted.geometry import MOVE, PLACE_BOMB
+from scripted.layers import ESCAPE_HORIZON, sweep, _base_doomed
 from scripted.pathfind import BOMB_TIMER, build_planner
 
 
-# Per-slot hard-coded opening books. Each entry is a list of action ints, one
-# per tick from step 0. After the script runs out, the gate yields and the
-# strategy cascade takes over. Keyed by team/slot index (prior.team).
+# Opening-book entry: place a bomb at the agent's current position, then
+# advance to the next entry once the bomb is observed in `belief.own_bombs`.
+BOMB = "bomb"
+
+# Hard cap on how long an opening may hold control. A book whose routes drag
+# (detours around walls/bodies) aborts here rather than eating the episode.
+OPENING_MAX_TICKS = 30
+
+# Per-slot waypoint opening books, keyed by slot index (`prior.team`, set by
+# `MapPrior.identify_team` at step 0). Slots without an entry fall through to
+# the cascade immediately; a strategy must also list `scripted_opening` in its
+# `gates` tuple to run a book at all. Each entry is an (x, y) waypoint walked
+# via the danger-aware planner — re-routed every tick — or `BOMB`.
 _OPENING_BOOKS = {
-    # 1: [PLACE_BOMB, BACKWARD, RIGHT, BACKWARD, FORWARD, FORWARD],
+    # 1: [(4, 2), BOMB, (7, 5)],
 }
 
 
@@ -34,20 +44,67 @@ def force_turn0_bomb(belief, danger, planner, params, action):
     return None
 
 def scripted_opening(belief, danger, planner, params, action):
-    """Per-slot hard-coded opening book.
+    """Per-slot waypoint opening book with a latched abort.
 
-    Looks up the agent's slot via `belief.prior.team` (set by
-    `MapPrior.identify_team` at step 0). If a book exists for that slot and
-    `belief.step` is within its length, return the scripted action; otherwise
-    yield (None) and let the strategy cascade run.
+    The book scripts *intent* (waypoints + bomb placements), not raw actions:
+    every tick the current waypoint is re-routed through the danger-aware
+    planner, so the opening adapts to bodies, bombs and breached walls while
+    still following the authored line. State lives in `belief.adaptive_state`
+    ("opening_idx", "opening_aborted") and resets per episode.
 
-    Slot 1 currently uses [PLACE_BOMB, BACKWARD, RIGHT, BACKWARD, FORWARD,
-    FORWARD] — a turn-0 breach plus a five-tick escape that clears the bomb's
-    fuse window before the cascade resumes."""
+    Latched abort — the first violation permanently hands control back to the
+    strategy cascade for the rest of the episode (no half-resumed scripts):
+      * danger at our tile within the escape horizon (survive owns the tick),
+      * body-block stuckness (`stuck_ticks >= params.stuck_trigger_ticks`),
+      * an unreachable waypoint, a BOMB entry with no bomb in hand,
+      * `belief.step > OPENING_MAX_TICKS`.
+    A finished book latches too, so exhausted openings cost one dict probe.
+    """
     book = _OPENING_BOOKS.get(belief.prior.team)
-    if book is None or belief.step >= len(book):
+    if not book:
         return None
-    return book[belief.step]
+    state = belief.adaptive_state
+    if state.get("opening_aborted"):
+        return None
+
+    def _abort(reason):
+        state["opening_aborted"] = True
+        _trace_decision(belief, "scripted_opening", "abort", reason)
+        return None
+
+    # Advance past completed entries: waypoints we stand on, and a BOMB whose
+    # bomb is already down on our tile.
+    idx = state.get("opening_idx", 0)
+    while idx < len(book):
+        entry = book[idx]
+        if entry == BOMB:
+            if not any(tuple(cell) == belief.location
+                       for cell, _ in belief.own_bombs):
+                break
+        elif tuple(entry) != belief.location:
+            break
+        idx += 1
+    state["opening_idx"] = idx
+    if idx >= len(book):
+        return _abort("book_complete")
+
+    if belief.step > OPENING_MAX_TICKS:
+        return _abort("timeout")
+    if danger.is_dangerous(belief.location, within=ESCAPE_HORIZON):
+        return _abort("danger")          # cascade's survive pick stands
+    if belief.stuck_ticks >= params.stuck_trigger_ticks:
+        return _abort("body_blocked")
+
+    entry = book[idx]
+    _trace_decision(belief, "scripted_opening", "entry", (idx, entry))
+    if entry == BOMB:
+        if belief.team_bombs < 1:
+            return _abort("no_bombs")
+        return PLACE_BOMB
+    first = planner.first_action(tuple(entry))
+    if first is None:
+        return _abort("unreachable_waypoint")
+    return first
 
 
 def _has_escape(belief, danger):
@@ -141,15 +198,26 @@ def strike_gate(belief, danger, planner, params, action):
     """Narrow tactical override: if the actor proposed a non-bomb action while in
     bomb range of a live, non-doomed enemy base (and we hold a bomb), place it.
 
+    Deliberately ignores `strike_dead_bases_cap`: after the strike layer gives
+    up, the cascade forages/hunts — but a bomb dropped in passing on an alive
+    base costs zero detour ticks and still scores, so the gate keeps taking
+    those freebies.
+
     No own-bomb escape check — friendly fire is OFF (an agent takes zero damage
     from its own bombs), so a base hit carries no self-harm and an escape gate
     would only veto value. Range is the real `bomb_reaches` primitive
     (Chebyshev-2 + LOS), not literal adjacency. When several bases are hit the
     action is still just PLACE_BOMB; the hit set is trace-only diagnostics, not a
     target selection.
+
+    Defers to survive: its `_strike_caveat` already weighed bombing from this
+    tile against the escape deadline — if survive still picked a flee move, the
+    bomb was not safe to place, and burning the tick here could be lethal.
     """
     if action == PLACE_BOMB:
         return None                      # cascade already chose a bomb; nothing to add
+    if belief.last_layer == "survive":
+        return None
     if belief.team_bombs < 1:
         return None
     targets = [base for base in belief.live_enemy_bases()

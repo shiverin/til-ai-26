@@ -1,4 +1,4 @@
-"""Mask-weighted PGD attack with MI-FGSM + DI-FGSM."""
+"""Mask-weighted PGD attack with MI-FGSM + DI-FGSM + TI-FGSM."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,13 +23,29 @@ class AttackConfig:
     mask_floor: float = 0.05       # tiny mask floor for gate margin
     momentum: float = 1.0          # MI-FGSM decay (0 disables)
     di_prob: float = 0.5           # DI-FGSM application probability
-    di_low: float = 0.9            # DI random-resize lower bound
+    di_low: float = 0.7            # DI random-resize lower bound (widened from 0.9)
     di_high: float = 1.0           # DI random-resize upper bound
+    ti_kernel_size: int = 15       # TI-FGSM Gaussian kernel size
+    ti_sigma: float = 3.0          # TI-FGSM Gaussian sigma
 
 
 class PGDAttacker:
     def __init__(self, cfg: AttackConfig | None = None):
         self.cfg = cfg or AttackConfig()
+        self._ti_kernel: Tensor | None = None
+
+    def _get_ti_kernel(self, grad: Tensor) -> Tensor:
+        """Lazily build and cache the depthwise Gaussian kernel for TI-FGSM."""
+        if self._ti_kernel is None:
+            size, sigma = self.cfg.ti_kernel_size, self.cfg.ti_sigma
+            coords = torch.arange(size, dtype=torch.float32) - size // 2
+            k1d = torch.exp(-coords ** 2 / (2 * sigma ** 2))
+            k2d = k1d.outer(k1d)
+            k2d = k2d / k2d.sum()
+            self._ti_kernel = (k2d.unsqueeze(0).unsqueeze(0)
+                               .expand(3, 1, -1, -1).contiguous()
+                               .to(device=grad.device, dtype=grad.dtype))
+        return self._ti_kernel
 
     def _input_diversity(self, x: Tensor) -> Tensor:
         """DI-FGSM: with prob di_prob, random-resize x to a smaller size
@@ -63,6 +79,7 @@ class PGDAttacker:
         # to keep SSIM-inside under the gate (concentrating fully on objects
         # collapses SSIM-inside below 0.3).
         mask_b = cfg.mask_floor + (1.0 - cfg.mask_floor) * mask_b
+        ti_pad = cfg.ti_kernel_size // 2
         g = torch.zeros_like(x)  # momentum accumulator
         for _ in range(cfg.n_iters):
             x_adv = (x + delta).clamp(0.0, 1.0)
@@ -70,6 +87,11 @@ class PGDAttacker:
             loss = -ensemble.loss(x_adv_di)
             grad = torch.autograd.grad(loss, delta, retain_graph=False,
                                        create_graph=False)[0]
+            # TI-FGSM: smooth gradient with Gaussian before normalising so
+            # perturbations that survive spatial shifts transfer better.
+            kernel = self._get_ti_kernel(grad)
+            grad = F.conv2d(F.pad(grad, [ti_pad, ti_pad, ti_pad, ti_pad],
+                                  mode="replicate"), kernel, groups=3)
             # MI-FGSM: normalize by L1 norm, accumulate with decay.
             grad_norm = grad / (grad.abs().mean(dim=(1, 2, 3),
                                                 keepdim=True) + 1e-12)

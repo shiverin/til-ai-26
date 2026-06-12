@@ -4,23 +4,22 @@
 # The base image, an example deep learning VM.
 # For a full list, see https://us-docker.pkg.dev/deeplearning-platform-release/gcr.io/
 # For info, see https://cloud.google.com/deep-learning-vm/docs/images#supported-frameworks
-FROM nvcr.io/nvidia/pytorch:25.11-py3
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 
 # Configures settings for the image.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV CV_CONF=0.40
-ENV CV_IMGSZ=1920
+ENV CV_IMGSZ=1536
 ENV CV_IOU=0.45
 ENV CV_TTA=0
 ENV CV_DENOISE=none
 ENV CV_SAHI=0
 WORKDIR /workspace
 
-# cv2 (shipped in the NGC base as opencv-python, not headless) needs
-# libGL.so.1 + libglib2.0 at import time. Install before pip resolves
-# anything so ultralytics can import cv2 inside the container.
+# cv2 needs libglib2.0 at import time. libgl1 is kept for any non-headless
+# opencv fallback. Install before pip so ultralytics can import cv2.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*

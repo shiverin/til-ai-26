@@ -52,6 +52,28 @@ def test_yields_when_only_reachable_base_is_doomed(monkeypatch):
     assert gates.strike_gate(b, None, None, None, FORWARD) is None
 
 
+def test_defers_to_survive_pick(monkeypatch):
+    # survive's _strike_caveat already weighed bombing against the escape
+    # deadline; if it still chose a flee move, the gate must not burn the tick.
+    b = _fresh_belief()
+    b.team_bombs = 2
+    b.last_layer = "survive"
+    _patch(monkeypatch, reaches=True, doomed=False)
+    assert gates.strike_gate(b, None, None, None, FORWARD) is None
+
+
+def test_fires_after_strike_dead_bases_cap_give_up(monkeypatch):
+    # The cap silences the strike layer, not the gate: walking past an alive
+    # base with bombs in hand still drops one (zero detour, still scores).
+    b = _fresh_belief()
+    b.team_bombs = 2
+    b.dead_bases = set(b.live_enemy_bases()[1:])  # two enemy bases down
+    b.base_health = 0.0                           # ours too -> dead == cap (3)
+    b.last_layer = "forage_chain"
+    _patch(monkeypatch, reaches=True, doomed=False)
+    assert gates.strike_gate(b, None, None, None, FORWARD) == PLACE_BOMB
+
+
 def test_filters_per_base_keeps_only_reachable_nondoomed(monkeypatch):
     b = _fresh_belief()
     b.team_bombs = 2

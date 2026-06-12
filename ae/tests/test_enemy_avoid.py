@@ -133,17 +133,60 @@ def test_sweep_avoids_near_enemy_tile_when_bias_enabled():
 
 # --- strategy wiring: only balanced_extreme_opening changes --------------- #
 
-def test_balanced_extreme_opening_enables_bias_and_disables_centre():
+def test_avoider_strategies_enable_bias_and_disable_centre():
+    # Both the opening agent and the forager radiate the 0.75 ** (3 - cheb)
+    # enemy-proximity penalty and drop the centre/peripheral collectible bias.
     from scripted.strategies import STRATEGIES
-    p = STRATEGIES["balanced_extreme_opening"].params
-    assert p.enemy_avoid_factor == 0.75
-    assert p.centre_value_weight == 0.0
+    for name in ("balanced_extreme_opening", "forager"):
+        p = STRATEGIES[name].params
+        assert p.enemy_avoid_factor == 0.75, name
+        assert p.centre_value_weight == 0.0, name
 
 
 def test_other_strategies_keep_defaults():
     from scripted.strategies import STRATEGIES, StrategyParams
     d = StrategyParams()
-    for name in ("balanced", "collector", "forager", "adaptive"):
+    for name in ("balanced", "collector", "adaptive"):
         p = STRATEGIES[name].params
         assert p.enemy_avoid_factor == d.enemy_avoid_factor      # 1.0 (off)
         assert p.centre_value_weight == d.centre_value_weight    # -0.4
+
+
+# --- visibility penalty: shrink the forager's search space ---------------- #
+
+def test_visibility_penalty_devalues_unseen_tiles():
+    from scripted.layers import _visibility_penalty
+    b = _belief()
+    b.last_visible_cells = {(2, 2)}
+    assert _visibility_penalty(b, (2, 2), 0.5) == 1.0     # visible -> no penalty
+    assert _visibility_penalty(b, (5, 5), 0.5) == 0.5     # unseen -> devalued
+    assert _visibility_penalty(b, (5, 5), 1.0) == 1.0     # factor 1.0 disables
+
+
+def test_forager_halves_unseen_collectibles():
+    from scripted.strategies import STRATEGIES
+    assert STRATEGIES["forager"].params.unseen_value_factor == 0.5
+
+
+def test_sweep_prefers_visible_collectible():
+    # Two equal-value collectibles: A=(3,2) closer to the agent but out of
+    # view; B=(7,4) farther but currently visible. With the penalty off, the
+    # closer A wins on raw rate; halving unseen tiles flips the choice to B.
+    from scripted.danger import DangerMap
+    from scripted.layers import sweep
+    from scripted.pathfind import build_planner
+    from scripted.strategies import StrategyParams
+
+    def _action(factor):
+        b = _sweep_belief()
+        b.enemies = set()                 # isolate the visibility effect
+        b.last_visible_cells = {(7, 4)}   # only the far tile is in view
+        danger = DangerMap({}, b)
+        planner = build_planner(b, danger)
+        params = StrategyParams(centre_value_weight=0.0, unseen_value_factor=factor)
+        return sweep(b, danger, planner, params), planner
+
+    action_off, planner = _action(1.0)
+    assert action_off == planner.first_action((3, 2))   # closer A wins on raw rate
+    action_on, planner = _action(0.5)
+    assert action_on == planner.first_action((7, 4))    # visible B wins after penalty

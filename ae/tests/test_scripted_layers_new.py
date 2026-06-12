@@ -181,6 +181,22 @@ def test_hunt_ignores_enemy_behind_wall():
     assert _hunt(b) is None
 
 
+def test_hunt_does_not_rebomb_enemy_an_own_bomb_already_covers():
+    # Enemy in range, but a bomb we placed last tick (still in flight) already
+    # covers it -> hunt yields so the agent moves on instead of re-bombing.
+    b = _open_belief(loc=(3, 3), team_bombs=2, enemies={(3, 4)})
+    b.own_bombs = [((3, 3), 3)]          # in-flight bomb at our tile reaches (3,4)
+    assert _hunt(b) is None
+
+
+def test_hunt_fires_when_in_flight_bomb_does_not_reach_enemy():
+    # An own bomb in flight elsewhere does NOT cover this enemy, so hunt still
+    # drops a fresh bomb on the in-range threat.
+    b = _open_belief(loc=(3, 3), team_bombs=2, enemies={(3, 4)})
+    b.own_bombs = [((0, 0), 3)]          # far-away bomb cannot reach (3,4)
+    assert _hunt(b) == PLACE_BOMB
+
+
 # ---------------------------------------------------------------------------
 # _move_result — frozen enemies block movement
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import io
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 
@@ -58,3 +59,51 @@ class NoiseManager:
         except Exception as e:
             print(f"[noise] error: {e} — returning original")
             return base64.b64encode(image).decode("ascii")
+
+    def noise_batch(self, images_bytes: list[bytes]) -> list[str]:
+        """Process a list of images as a single GPU batch.
+
+        Images may have different sizes; all are zero-padded to the maximum
+        H and W in the batch, attacked together, then cropped back.
+        Falls back to sequential per-image processing on OOM or other errors.
+        """
+        if not images_bytes:
+            return []
+        try:
+            arrays: list[np.ndarray] = []
+            orig_sizes: list[tuple[int, int]] = []
+            for img_bytes in images_bytes:
+                arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+                arrays.append(arr)
+                orig_sizes.append((arr.shape[0], arr.shape[1]))
+
+            max_H = max(s[0] for s in orig_sizes)
+            max_W = max(s[1] for s in orig_sizes)
+
+            # Pad each array to (max_H, max_W) before stacking into a batch.
+            tensors = []
+            for arr, (H, W) in zip(arrays, orig_sizes):
+                if H < max_H or W < max_W:
+                    padded = np.zeros((max_H, max_W, 3), dtype=np.uint8)
+                    padded[:H, :W] = arr
+                    arr = padded
+                tensors.append(self._to_tensor(arr))  # [1, 3, max_H, max_W]
+
+            x_batch = torch.cat(tensors, dim=0)               # [B, 3, max_H, max_W]
+            mask_batch = self.mask.mask(x_batch)               # [B, max_H, max_W]
+            adv_batch = self.attacker.attack(x_batch, mask_batch, self.ensemble)
+
+            results = []
+            for i, (orig_H, orig_W) in enumerate(orig_sizes):
+                adv = adv_batch[i:i + 1, :, :orig_H, :orig_W]
+                buf = io.BytesIO()
+                Image.fromarray(self._from_tensor(adv)).save(buf, format="PNG")
+                results.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+            return results
+
+        except torch.cuda.OutOfMemoryError:
+            print("[noise] OOM in batch — falling back to sequential")
+            return [self.noise(b) for b in images_bytes]
+        except Exception as e:
+            print(f"[noise] batch error: {e} — falling back to sequential")
+            return [self.noise(b) for b in images_bytes]

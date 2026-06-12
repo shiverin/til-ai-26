@@ -28,17 +28,8 @@ async def noise(request: Request) -> dict[str, list[str]]:
     """
 
     inputs_json = await request.json()
-
-    predictions = []
-    for instance in inputs_json["instances"]:
-
-        # Reads the base-64 encoded image and decodes it into bytes.
-        image_bytes = base64.b64decode(instance["b64"])
-
-        # Performs adversarial noising and appends the result.
-        noised_image = manager.noise(image_bytes)
-        predictions.append(noised_image)
-
+    images_bytes = [base64.b64decode(inst["b64"]) for inst in inputs_json["instances"]]
+    predictions = manager.noise_batch(images_bytes)
     return {"predictions": predictions}
 
 

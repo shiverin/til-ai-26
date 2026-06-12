@@ -103,6 +103,20 @@ class Planner:
             s, action = self._prev[s]
         return action
 
+    def route_to(self, tile):
+        """Tiles along the earliest route to `tile`, start cell excluded
+        (turn-in-place steps repeat a tile). Empty if unreachable or already
+        there."""
+        goal = self._tile_goal.get(tuple(tile))
+        if goal is None or goal == self._start:
+            return []
+        cells, s = [], goal
+        while s != self._start:
+            cells.append(s[0])
+            s, _ = self._prev[s]
+        cells.reverse()
+        return cells
+
     def has_safe_continuation(self):
         """True iff some reachable state reaches the hazard-free tail (phase
         T_MAX) — i.e. the agent can stay non-lethal until every known enemy bomb

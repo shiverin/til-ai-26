@@ -1,10 +1,23 @@
-ultralytics==8.3.40
+#ultralytics==8.3.40
 opencv-python-headless==4.10.0.84
+#fastapi==0.115.12
+#uvicorn[standard]==0.34.2
+#pillow==11.0.0
+#numpy==1.26.4
+#onnx
+#onnxslim
+#onnxruntime-gpu
+#sahi==0.11.21
+
+
+ultralytics==8.4.50
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 pillow==11.0.0
 numpy==1.26.4
 onnx
 onnxslim
-onnxruntime-gpu
+# Standard PyPI builds use CUDA 12.x.
+# Pin below 1.27 because ONNX Runtime announced CUDA 12 removal in 1.27.
+onnxruntime-gpu==1.26.0
 sahi==0.11.21

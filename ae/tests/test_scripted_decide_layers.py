@@ -96,6 +96,49 @@ def test_strike_skips_a_base_believed_destroyed():
     assert strike(b, danger, p, StrategyParams()) is None
 
 
+def test_strike_gives_up_after_three_dead_enemy_bases():
+    """Three bases observed dead -> strike yields even with a live base in
+    bomb range and bombs in hand."""
+    prior = _base_prior(enemy_bases=((3, 3), (5, 5), (1, 1), (5, 1)))
+    b = _strike_belief(prior, (3, 5))            # in range of live base (3,3)
+    b.base_health = 100.0                        # our base alive
+    b.dead_bases = {(5, 5), (1, 1), (5, 1)}      # 3 enemy bases down
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert strike(b, danger, p, StrategyParams()) is None
+
+
+def test_strike_counts_our_own_dead_base_toward_the_cap():
+    prior = _base_prior(enemy_bases=((3, 3), (5, 5), (1, 1)))
+    b = _strike_belief(prior, (3, 5))
+    b.base_health = 0.0                          # our base destroyed
+    b.dead_bases = {(5, 5), (1, 1)}              # + 2 enemy bases = 3 dead
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert strike(b, danger, p, StrategyParams()) is None
+
+
+def test_strike_keeps_attacking_below_the_dead_base_cap():
+    prior = _base_prior(enemy_bases=((3, 3), (5, 5), (1, 1)))
+    b = _strike_belief(prior, (3, 5))
+    b.base_health = 100.0
+    b.dead_bases = {(5, 5)}                      # only 2 dead incl. nobody else
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    assert strike(b, danger, p, StrategyParams()) == 5        # PLACE_BOMB
+
+
+def test_strike_dead_base_cap_zero_disables_the_give_up():
+    prior = _base_prior(enemy_bases=((3, 3), (5, 5), (1, 1), (5, 1)))
+    b = _strike_belief(prior, (3, 5))
+    b.base_health = 0.0
+    b.dead_bases = {(5, 5), (1, 1), (5, 1)}      # 4 dead incl. our own
+    danger = DangerMap({}, b)
+    p = build_planner(b, danger)
+    params = StrategyParams(strike_dead_bases_cap=0)
+    assert strike(b, danger, p, params) == 5                  # PLACE_BOMB
+
+
 def test_strike_stops_bombing_a_doomed_base():
     """When the agent's own bombs already in flight will finish a base, Strike
     does not waste another bomb on it."""
@@ -383,19 +426,18 @@ def test_strike_does_not_breach_with_only_one_bomb():
     assert strike(b, danger, p, StrategyParams()) is None
 
 
-def test_strike_skips_breach_when_an_ally_bomb_already_opens_the_wall():
-    """An ally bomb already opening the breach wall makes scenario A reach the
-    base for free -> scenario B is not strictly faster -> no breach bomb."""
+def test_strike_bombs_through_a_wall_an_ally_bomb_is_opening():
+    """An ally bomb already opening the breach wall turns the agent's tile
+    into a free strike tile: every bomb in the air detonates before one placed
+    now, so the wall is gone by the time our bomb blows — it damages the base
+    directly, no opener wasted."""
     from scripted.geometry import PLACE_BOMB as _PLACE_BOMB_ACT
     b = _strike_belief(_walled_base_prior(), (1, 3), team_bombs=3)
     b.ally_bombs = {(2, 3): 2}                 # blast opens (2,3)|(3,3) at tick 2
     danger = DangerMap({}, b)
     p = build_planner(b, danger)
-    # Scenario A already reaches the base via the ally-opened wall — strike
-    # navigates (or briefly STAYs to let the wall open AFTER detonate) instead
-    # of breaching with its own bomb.
     action = strike(b, danger, p, StrategyParams())
-    assert action != _PLACE_BOMB_ACT
+    assert action == _PLACE_BOMB_ACT
 
 
 # --- effective HP ----------------------------------------------------------

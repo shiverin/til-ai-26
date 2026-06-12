@@ -82,6 +82,9 @@ def act(belief, action_mask, strategy=None):
         chosen = _first_legal(mask, [FORWARD, BACKWARD, LEFT, RIGHT, STAY])
         source = "first_legal"
 
+    # Publish the cascade's pick before gates run, so survive-deference checks
+    # (body_block_resolve, strike_gate) read THIS tick's layer, not last tick's.
+    belief.last_layer = source
     for gate in getattr(strategy, "gates", ()):
         override = gate(belief, danger, planner, strategy.params, chosen)
         if _legal(override, mask):

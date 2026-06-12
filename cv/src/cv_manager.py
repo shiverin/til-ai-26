@@ -49,7 +49,7 @@ class CVManager:
         self.tta = tta
         self.denoise = denoise
         self.sahi_model = sahi_model
-        self.half = torch.cuda.is_available()
+        self.half = False  # fp16 breaks on Blackwell SM120; fp32 is safe everywhere
         self.device = 0 if torch.cuda.is_available() else "cpu"
         print(f"[cv] conf={conf} iou={iou} imgsz={imgsz} tta={tta} "
               f"denoise={denoise} sahi={'on' if sahi_model else 'off'}")
