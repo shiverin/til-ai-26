@@ -200,3 +200,10 @@ asr/models/encoder_external.onnx
 *.onnx
 *.onnx.data
 *.mp4
+
+# Surprise-game generated artifacts
+**/replays/
+**/reports/
+repomix-output.xml
+deep-research-report.md
+*.pdf

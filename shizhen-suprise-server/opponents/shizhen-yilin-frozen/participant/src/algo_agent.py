@@ -101,6 +101,7 @@ class AlgoAgent(PlayerAgent):
 
         try:
             actions = validate.validate(world, actions)
+            world.reconcile_ledger(turn, actions)
         except Exception:
             log.exception("turn %s: validator failed — submitting unvalidated", turn)
 

@@ -1,5 +1,0 @@
-"""Pytest config: make `postprocess` importable as a top-level package."""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))

@@ -7,12 +7,16 @@ ledgered so a building is never queued past its free-neighbour capacity.
 
 from __future__ import annotations
 
+import logging
+
 from engine.actions import ConstructBuildingAction, ProduceUnitAction
 from engine.constants import BUILDING_STATS, UNIT_STATS
 from engine.hex_grid import HexCoord
 
 from threats import L1, L2, ThreatReport
 from world import WorldMemory, coord_of
+
+log = logging.getLogger("economy")
 
 DEFENSE_RESERVE = 150
 RESERVE_FROM_TURN = 30
@@ -35,6 +39,11 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
     reserve = (
         DEFENSE_RESERVE if world.turn >= RESERVE_FROM_TURN and level < L2 else 0
     )
+    # wealth pressure: once the treasury outgrows every fixed sink, raise the
+    # army/building targets so income converts into force instead of pooling
+    # (seed-67 multi-agent run: 121k idle gold while being ground down at L2)
+    surplus = max(0, gold - reserve)
+    wealth_bonus = min(30, surplus // 1000)
 
     prod_buildings = {
         bt: [
@@ -45,13 +54,17 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
         for bt in ("Barracks", "Factory", "Airbase")
     }
 
+    at_war = threat.war_prep or level >= L2
+
     def produce(unit_type: str, source_type: str) -> bool:
         nonlocal gold
         cost = UNIT_STATS[unit_type].gold_cost
         if gold < cost:
             return False
         for b in prod_buildings[source_type]:
-            target = _spawn_tile(world, b, reserved)
+            # at war, throughput beats the safety buffer: every spawn tile
+            # counts (cb31973a: capacity-starved at L2 with 100k banked)
+            target = _spawn_tile(world, b, reserved, relax=at_war)
             if target is None:
                 continue
             actions.append(
@@ -65,11 +78,21 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
                     "unit_type": unit_type,
                     "due_turn": world.turn + UNIT_STATS[unit_type].build_turns,
                     "target": target,
+                    "ordered_turn": world.turn,
                 }
             )
             reserved.add(target)
             gold -= cost
             return True
+        if prod_buildings[source_type]:
+            # cada2771 post-mortem: this exact stall (silted spawn rings) is how
+            # 139k gold died to a Fighter swarm — keep it loud even at WARNING
+            log.warning(
+                "turn %s: want %s but no free spawn tile on any %s",
+                world.turn,
+                unit_type,
+                source_type,
+            )
         return False
 
     n_bases = max(1, len(world.bases))
@@ -80,34 +103,46 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
     inf_per_base = GARRISON_PER_BASE.get(level, 3)
     art_per_base = 2
     med_per_base = 1
-    at_war = threat.war_prep or level >= L2
     if threat.war_prep:
-        inf_per_base = max(inf_per_base, 8)
+        # 1ff4e9f5: 70 Infantry melted to 17 against air blitzes for ~zero
+        # value — at war Infantry is chaff; the gold belongs in the sky
+        inf_per_base = 4
         art_per_base = 6
         med_per_base = 2
     # at war, ranged + air defense first: Fighter swarms killed us in testing —
-    # only Fighters (and massed Artillery) can answer range-2/move-3 attackers
+    # only Fighters (and massed Artillery) can answer range-2/move-3 attackers.
+    # Match the air race we can OBSERVE: opponents converted their whole chest
+    # to flyers at the void and outnumbered us 78:39 in the air (1ff4e9f5)
+    enemy_air = sum(
+        1
+        for r in world.enemy_units.values()
+        if r["type"] in ("Fighter", "Bomber")
+        and r.get("owner_id") not in world.eliminated
+    )
     if at_war:
-        while world.our_unit_count("Fighter") < 2 * n_bases and produce(
+        fighter_target = max(2 * n_bases + wealth_bonus, enemy_air + enemy_air // 5)
+        while world.our_unit_count("Fighter") < fighter_target and produce(
             "Fighter", "Airbase"
         ):
             pass
-        while world.our_unit_count("Artillery") < art_per_base * n_bases and produce(
-            "Artillery", "Factory"
-        ):
+        while world.our_unit_count(
+            "Artillery"
+        ) < art_per_base * n_bases + wealth_bonus and produce("Artillery", "Factory"):
             pass
     inf_target = inf_per_base * n_bases
     while world.our_unit_count("Infantry") < inf_target and produce("Infantry", "Barracks"):
         pass
     if world.our_unit_count("Medic") < med_per_base * n_bases:
         produce("Medic", "Barracks")
-    while world.our_unit_count("Artillery") < art_per_base * n_bases and produce(
-        "Artillery", "Factory"
-    ):
+    while world.our_unit_count(
+        "Artillery"
+    ) < art_per_base * n_bases + wealth_bonus and produce("Artillery", "Factory"):
         pass
     # war: drain the remaining chest into Tanks (mobile HP blocks)
     if at_war and gold > 1000:
-        while world.our_unit_count("Tank") < 2 * n_bases and produce("Tank", "Factory"):
+        while world.our_unit_count("Tank") < 2 * n_bases + wealth_bonus and produce(
+            "Tank", "Factory"
+        ):
             pass
 
     # scouts: #1 immediately, #2 from turn 8 (A/B candidate per plan)
@@ -115,11 +150,20 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
     if scouts < 1 or (scouts < 2 and world.turn >= 8):
         produce("Scout", "Barracks")
 
-    # post-airbase deterrence package: 2 Bombers, then 1 Fighter with surplus
-    if world.our_unit_count("Bomber") < 2:
-        produce("Bomber", "Airbase")
-    elif world.our_unit_count("Fighter") < 2 and gold > 800:
-        produce("Fighter", "Airbase")
+    # post-airbase standing air force, growing with the treasury. Fighters
+    # FIRST: they are the only answer to enemy Fighter swarms (move 3 / range 2
+    # kites everything on the ground), and gemini's 16-Fighter sweep at the
+    # turn-200 void is what killed every base in cada2771. Bombers after.
+    fighter_floor = max(2, min(24, surplus // 1200))
+    while world.our_unit_count("Fighter") < fighter_floor and produce(
+        "Fighter", "Airbase"
+    ):
+        pass
+    bomber_floor = max(2, min(8, surplus // 2500))
+    while world.our_unit_count("Bomber") < bomber_floor and produce(
+        "Bomber", "Airbase"
+    ):
+        pass
 
     def afford(building_type: str) -> bool:
         return gold - reserve >= BUILDING_STATS[building_type].gold_cost
@@ -156,7 +200,10 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
             build("Barracks", spot)
 
     # ── other buildings (frozen at L2 — every coin goes to units) ─────────────
-    if level >= L2:
+    # ...unless the treasury dwarfs unit throughput: then gold is NOT the
+    # constraint, and refusing to rebuild lost Mines/Factory/Airbase under
+    # pressure is how a 100k war chest dies with 3 Barracks (seed-67 FFA).
+    if level >= L2 and gold < 1500:
         return actions
 
     # Mines: rich tiles first; cap scales with bases, profitable until ~T-12
@@ -177,12 +224,20 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
 
     # expansion / redundant Bases (extra lives)
     total_bases = world.building_count("Base")
+    # at war, redundancy IS the win condition: losing 4 bases in 15 turns while
+    # the expansion timer allowed 1 rebuild per 20 is how cb31973a went 6 bases
+    # -> 1. Below 3 bases the spacing gate shrinks to a token anti-spam delay.
+    rebuild_rush = at_war and total_bases < 3
+    spacing = 3 if rebuild_rush else BASE_SPACING_TURNS // 2
     want_base = (
         world.turn >= EXPANSION_FROM_TURN
-        and world.turn - world.last_base_order_turn >= BASE_SPACING_TURNS // 2
+        and world.turn - world.last_base_order_turn >= spacing
         and (
-            total_bases < 2
+            rebuild_rush
+            or total_bases < 2
             or (total_bases < 4 and gold - reserve >= 600)
+            or (total_bases < 6 and gold - reserve >= 5000)
+            or (total_bases < 8 and gold - reserve >= 20000)
         )
         and afford("Base")
     )
@@ -199,10 +254,30 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
     else:
         world.expansion_goal = None
 
+    # Heavy production must BREATHE: one Factory/Airbase with a silted ring
+    # cannot convert a six-figure war chest into Artillery/Fighters (cada2771:
+    # Factory at 0 free neighbours from turn 150 → death at 221 with 139k gold).
+    # Add another whenever the existing rings are starved or wealth allows.
+    def ring_free(bt: str) -> int:
+        return sum(
+            1
+            for b in prod_buildings[bt]
+            for c in grid.neighbors(coord_of(b))
+            if c not in world.occupied and c not in reserved
+        )
+
     # Factory for Artillery defense
+    # caps scale with the treasury: f276a8bb ended with 205k unspent because 3
+    # Factories/Airbases were the conversion ceiling, not gold
+    factory_cap = min(
+        7 if at_war else 5,
+        1 + surplus // 4000 + (1 if at_war else 0),
+    )
+    n_factories = world.building_count("Factory")
     if (
         world.turn >= FACTORY_FROM_TURN
-        and world.building_count("Factory") == 0
+        and n_factories < factory_cap
+        and (n_factories == 0 or ring_free("Factory") < 2 or surplus >= 4000)
         and gold - reserve >= BUILDING_STATS["Factory"].gold_cost + 100
     ):
         spot = _building_spot(world, "Factory", reserved)
@@ -225,11 +300,19 @@ def decide(world: WorldMemory, threat: ThreatReport, reserved: set[HexCoord]) ->
             break
 
     # Airbase: in time for the turn-200 treaty void, or earlier on big surplus;
-    # a second one at war for Fighter (anti-air) throughput
-    airbase_cap = 2 if (threat.war_prep and gold - reserve >= 1000) else 1
-    if world.building_count("Airbase") < airbase_cap and (
-        (world.turn >= AIRBASE_BUILD_BY and afford("Airbase"))
-        or gold - reserve >= 1500
+    # more at wealth/war for Fighter (anti-air) throughput
+    airbase_cap = min(
+        7 if at_war else 5,
+        1 + surplus // 4000 + (1 if at_war and surplus >= 1000 else 0),
+    )
+    n_airbases = world.building_count("Airbase")
+    if (
+        n_airbases < airbase_cap
+        and (
+            (world.turn >= AIRBASE_BUILD_BY and afford("Airbase"))
+            or gold - reserve >= 1500
+        )
+        and (n_airbases == 0 or ring_free("Airbase") < 2 or surplus >= 4000)
     ):
         spot = _building_spot(world, "Airbase", reserved)
         if spot:
@@ -256,30 +339,6 @@ def _free_for_build(world: WorldMemory, c: HexCoord, reserved) -> bool:
     )
 
 
-def _boxes_production(world: WorldMemory, c: HexCoord) -> bool:
-    """Never take the last free neighbour of a production building. Own-unit
-    tiles count as free — units vacate; buildings are forever."""
-    for b in world.own_buildings:
-        if b["type"] not in ("Barracks", "Factory", "Airbase"):
-            continue
-        bc = coord_of(b)
-        if world.grid.distance(bc, c) != 1:
-            continue
-        free = 0
-        for n in world.grid.neighbors(bc):
-            if n == c:
-                continue
-            occ = world.occupied.get(n)
-            if occ is None or (
-                occ.get("owner_id") == world.player_id
-                and occ["type"] not in BUILDING_STATS
-            ):
-                free += 1
-        if free <= world.pending_spawns_for(b["id"]):
-            return True
-    return False
-
-
 def _building_spot(
     world: WorldMemory, building_type: str, reserved, near: HexCoord | None = None
 ) -> HexCoord | None:
@@ -296,21 +355,53 @@ def _building_spot(
     best, best_score = None, -(10**9)
     for b in anchors:
         for c in grid.neighbors(coord_of(b)):
-            if not _free_for_build(world, c, reserved) or _boxes_production(world, c):
+            if not _free_for_build(world, c, reserved):
                 continue
+            if c in spawn_ring:
+                continue  # spawn rings are sacred — a soft penalty here is how
+                # the Factory ended up at 0 free neighbours (cada2771)
             rich = c in world.rich_tiles
             score = 0
             if building_type == "Mine":
                 score += 100 if rich else 0
             else:
                 score -= 50 if rich else 0
-            if c in spawn_ring:
-                score -= 60  # don't eat production spawn tiles
+            if building_type in ("Barracks", "Factory", "Airbase"):
+                # production wants elbow room: reward open rings of its own
+                score += 8 * sum(
+                    1
+                    for n in grid.neighbors(c)
+                    if n not in world.occupied and n not in reserved
+                )
             if near is not None:
                 score -= grid.distance(c, near)
             if score > best_score:
                 best, best_score = c, score
     return best
+
+
+GRAVEYARD_MEMORY_TURNS = 40
+GRAVEYARD_RADIUS = 5
+HOSTILE_KEEPOUT = 4
+
+
+def _danger_zones(world: WorldMemory) -> tuple[list[HexCoord], list[HexCoord]]:
+    """Tiles a new Base must avoid: recently seen hostile units (the pack that
+    killed the last base is still hunting) and recent base graveyards (cb31973a:
+    rebuilds 3 tiles from the previous kill died to the same Fighter/Bomber pack)."""
+    hostiles = [
+        coord_of(r)
+        for r in world.enemy_units.values()
+        if r.get("owner_id") not in world.eliminated
+        and world.turn - r.get("last_seen", 0) <= 8
+        and not world.at_peace_with(r.get("owner_id"))
+    ]
+    graves = [
+        c
+        for c, t in world.base_graveyard
+        if world.turn - t <= GRAVEYARD_MEMORY_TURNS
+    ]
+    return hostiles, graves
 
 
 def _base_spot(world: WorldMemory, reserved) -> HexCoord | None:
@@ -330,6 +421,7 @@ def _base_spot(world: WorldMemory, reserved) -> HexCoord | None:
         for r in world.enemy_buildings.values()
         if r["type"] != "Base" and r.get("owner_id") not in world.eliminated
     ]
+    hostiles, graves = _danger_zones(world)
     best, best_score = None, -(10**9)
     for c in world.visible:
         if c in world.occupied or c in reserved:
@@ -340,11 +432,18 @@ def _base_spot(world: WorldMemory, reserved) -> HexCoord | None:
         d_ebase = min((grid.distance(c, e) for e in enemy_bases), default=99)
         if d_ebase < 6:
             continue  # crowding a neighbour's home invites the wars we're avoiding
+        d_host = min((grid.distance(c, h) for h in hostiles), default=99)
+        if d_host < HOSTILE_KEEPOUT:
+            continue  # founding under a hunting pack is a 300g donation
+        d_grave = min((grid.distance(c, g) for g in graves), default=99)
+        if d_grave < GRAVEYARD_RADIUS:
+            continue  # the killer is still patrolling here
         d_eother = min((grid.distance(c, e) for e in enemy_other), default=99)
         score = (
             (200 if c in world.rich_tiles else 0)
             + min(d_ebase, 15)
             + min(d_eother, 6)
+            + 2 * min(d_host, 10)
             - d_own
         )
         if score > best_score:
@@ -361,6 +460,7 @@ def _expansion_goal(world: WorldMemory) -> HexCoord | None:
         for r in world.enemy_buildings.values()
         if r["type"] == "Base" and r.get("owner_id") not in world.eliminated
     ]
+    hostiles, graves = _danger_zones(world)
     best, best_score = None, -(10**9)
     for c in world.terrain:
         if c in world.occupied:
@@ -371,20 +471,33 @@ def _expansion_goal(world: WorldMemory) -> HexCoord | None:
         d_ebase = min((grid.distance(c, e) for e in enemy_bases), default=99)
         if d_ebase < 7:
             continue
+        if min((grid.distance(c, h) for h in hostiles), default=99) < HOSTILE_KEEPOUT:
+            continue
+        if min((grid.distance(c, g) for g in graves), default=99) < GRAVEYARD_RADIUS:
+            continue
         score = (150 if c in world.rich_tiles else 0) + min(d_ebase, 15) - d_own
         if score > best_score:
             best, best_score = c, score
     return best
 
 
-def _spawn_tile(world: WorldMemory, building: dict, reserved) -> HexCoord | None:
+def _spawn_tile(
+    world: WorldMemory, building: dict, reserved, relax: bool = False
+) -> HexCoord | None:
+    """A free neighbour not already promised to a pending spawn (spawn-or-lose-
+    gold: two orders landing on one tile silently burn the second unit)."""
     bc = coord_of(building)
+    pending = {p["target"] for p in world.production_ledger}
     free = [
         c
         for c in world.grid.neighbors(bc)
-        if c not in world.occupied and c not in reserved
+        if c not in world.occupied and c not in reserved and c not in pending
     ]
-    # spawn-or-lose-gold: leave room for everything already queued here
-    if len(free) <= world.pending_spawns_for(building["id"]):
-        return None
-    return free[0]
+    # demand a buffer tile beyond the target: completion is build_turns away,
+    # and a ring that is full-minus-one at order time tends to be full at
+    # completion (c2f5fc26: 8 Fighters silently lost to exactly this drift).
+    # At war (relax) the buffer is waived: risking one unit to drift beats
+    # leaving the war chest unconverted while bases fall (cb31973a).
+    if relax:
+        return free[0] if free else None
+    return free[0] if len(free) >= 2 else None

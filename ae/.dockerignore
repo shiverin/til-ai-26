@@ -32,4 +32,7 @@ SOLUTION.md
 docs/
 logs/
 *.md
+*.onnx
+*.pt
+*.engine
 runs/

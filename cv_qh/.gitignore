@@ -1,9 +1,0 @@
-dataset/
-weights/
-.venv/
-__pycache__/
-*.pyc
-*.pt
-*.pth
-.pytest_cache/
-.ruff_cache/

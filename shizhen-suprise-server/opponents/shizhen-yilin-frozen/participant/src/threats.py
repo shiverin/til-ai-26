@@ -14,7 +14,8 @@ from world import WorldMemory, coord_of
 L0, L1, L2 = 0, 1, 2
 L1_RADIUS = 8
 L2_RADIUS = 4
-WAR_PREP_LEAD = 15  # turns before the treaty void to re-arm (PLAN A6)
+WAR_PREP_LEAD = 20  # turns before the treaty void to re-arm (PLAN A6);
+# 15 proved too late once production throughput is the bottleneck, not gold
 
 
 class ThreatReport:

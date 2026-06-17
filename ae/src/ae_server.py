@@ -5,24 +5,15 @@
 
 
 import json
-import os
 
-from ae_manager import AEManager, HybridAEManager, NeuralAEManager
+from ae_manager import AEManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
 
-# AE_MODE selects the deployed agent: "scripted" (rule cascade — known-strong
-# baseline) or "neural" (trained BC clone served via ONNX). Default scripted.
-_mode = os.environ.get("AE_MODE", "scripted").lower()
-if _mode == "neural":
-    manager = NeuralAEManager()
-elif _mode == "hybrid":
-    manager = HybridAEManager()
-elif _mode == "scripted":
-    manager = AEManager()
-else:
-    raise ValueError(f"AE_MODE={_mode!r} must be 'scripted', 'neural', or 'hybrid'")
+# The deployed agent is the deterministic scripted rule cascade. Which strategy
+# it serves is chosen via the AE_STRATEGY env var (see AEManager / Dockerfile).
+manager = AEManager()
 
 
 @app.post("/ae")

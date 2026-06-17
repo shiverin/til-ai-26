@@ -11,6 +11,7 @@ never iterated beyond a cheap sender check and never stored.
 
 from __future__ import annotations
 
+from engine.actions import ProduceUnitAction
 from engine.constants import BUILDING_STATS
 from engine.hex_grid import HexCoord, HexGrid
 
@@ -47,6 +48,8 @@ class WorldMemory:
         self.proposals_sent: dict[str, int] = {}  # pid -> turn last proposed
         self.partner_perimeter: dict[str, int] = {}  # pid -> camping score
         self.production_ledger: list[dict] = []  # building_id, unit_type, due_turn, target
+        self.base_graveyard: list[tuple[HexCoord, int]] = []  # (coord, turn lost)
+        self._prev_base_coords: set[HexCoord] = set()
         self.scout_targets: dict[str, HexCoord] = {}
         self.expansion_goal: HexCoord | None = None
         self.last_base_order_turn = -999
@@ -123,6 +126,18 @@ class WorldMemory:
 
         if self.home is None and self.bases:
             self.home = coord_of(self.bases[0])
+
+        # graveyard: a Base coord we held last turn with no Base on it now means
+        # the Base died (own entities are always visible) — remember where, so
+        # rebuilds stop walking into the same hunter's kill zone (cb31973a:
+        # rebuilt 3 tiles from a fresh base kill and lost the rebuild in 11 turns)
+        cur_base_coords = {
+            coord_of(b) for b in self.own_buildings if b["type"] == "Base"
+        }
+        for c in self._prev_base_coords - cur_base_coords:
+            self.base_graveyard.append((c, turn))
+        self.base_graveyard = self.base_graveyard[-32:]
+        self._prev_base_coords = cur_base_coords
 
         # forget remembered enemies disproven by current vision
         for reg in (self.enemy_buildings, self.enemy_units):
@@ -202,6 +217,26 @@ class WorldMemory:
 
     def pending_spawns_for(self, building_id: str) -> int:
         return sum(1 for p in self.production_ledger if p["building_id"] == building_id)
+
+    def reconcile_ledger(self, turn: int, final_actions: list) -> None:
+        """Drop this-turn ledger entries whose produce order didn't survive
+        validation — phantom entries otherwise block the spawn-tile picker for
+        build_turns turns (and on a 2-tile ring that is a permanent stall)."""
+        survived = [
+            (a.building_id, a.unit_type, a.target)
+            for a in final_actions
+            if isinstance(a, ProduceUnitAction)
+        ]
+        kept = []
+        for p in self.production_ledger:
+            if p.get("ordered_turn") != turn:
+                kept.append(p)
+                continue
+            key = (p["building_id"], p["unit_type"], p["target"])
+            if key in survived:
+                survived.remove(key)
+                kept.append(p)
+        self.production_ledger = kept
 
     def our_unit_count(self, unit_type: str) -> int:
         n = sum(1 for u in self.own_units if u["type"] == unit_type)
