@@ -1,0 +1,30 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 10000,
+  "response_timeout": 10.0,
+  "port_start": 7800,
+  "agents": [
+    {
+      "name": "baseline",
+      "path": "/home/jupyter/til-26-surprise"
+    },
+    {
+      "name": "shizhen-gpt",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gpt"
+    },
+    {
+      "name": "shizhen-gemini",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gemini"
+    },
+    {
+      "name": "yilin",
+      "path": "/home/jupyter/til-26-surprise-yilin"
+    },
+    {
+      "name": "xinyang",
+      "path": "/home/jupyter/xinyang"
+    }
+  ]
+}

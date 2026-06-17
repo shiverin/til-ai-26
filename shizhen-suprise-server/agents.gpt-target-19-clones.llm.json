@@ -1,0 +1,110 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 600,
+  "response_timeout": 10.0,
+  "port_start": 7825,
+  "agents": [
+    {
+      "name": "target-gpt-llm",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gpt",
+      "agent": "llm"
+    },
+    {
+      "name": "v1-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-05",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-05",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-06",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-06",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-07",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-07",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-08",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-08",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-09",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen-09",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-10",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 10000,
+  "response_timeout": 10.0,
+  "port_start": 8400,
+  "agents": [
+    {
+      "name": "gemini",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-diplomacy",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-diplomacy-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "diplomacy"}
+    },
+    {
+      "name": "gpt-air-control",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-air-control-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "air-control"}
+    },
+    {
+      "name": "gpt-expansion-fortress",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-expansion-fortress-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "expansion-fortress"}
+    },
+    {
+      "name": "gpt-scout-vision",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-scout-vision-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "scout-vision"}
+    },
+    {
+      "name": "gpt-balanced",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-balanced-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "balanced"}
+    },
+    {
+      "name": "yilin",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "xinyang",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/xinyang",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-base-assault-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-05",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-06",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-07",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-08",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-09",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-10",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-11",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-base-assault-12",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    }
+  ]
+}

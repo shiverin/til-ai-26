@@ -1,0 +1,110 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 300,
+  "response_timeout": 10.0,
+  "port_start": 8100,
+  "agents": [
+    {
+      "name": "yilin",
+      "path": "/home/jupyter/til-26-surprise-yilin",
+      "agent": "algo"
+    },
+    {
+      "name": "shizhen-gpt",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gpt",
+      "agent": "algo"
+    },
+    {
+      "name": "shizhen-gemini",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gemini",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-diplomacy-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-diplomacy-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-diplomacy-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-diplomacy-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-air-control-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-air-control-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-air-control-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-air-control-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-expansion-fortress-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-expansion-fortress-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-expansion-fortress-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-expansion-fortress-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-scout-vision-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-scout-vision-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-scout-vision-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-scout-vision-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-balanced-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-balanced-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-balanced-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-balanced-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "shizhen-gemini-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "shizhen-gemini-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-frozen",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "v1-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-v1-frozen",
+      "agent": "algo"
+    }
+  ]
+}

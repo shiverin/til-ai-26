@@ -1,0 +1,110 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 10000,
+  "response_timeout": 10.0,
+  "port_start": 8040,
+  "agents": [
+    {
+      "name": "gpt",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/_pruned_archive/shizhen-gpt-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-05",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-06",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-07",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-08",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-09",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "gemini-10",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-gemini-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-05",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-06",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-07",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-08",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-09",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.log
+logs/
+replays/
+.claude/
+.env
+.venv/
+repomix-output.xml
+**/repomix-output.xml

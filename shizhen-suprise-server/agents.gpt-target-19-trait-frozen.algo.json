@@ -1,0 +1,125 @@
+{
+  "seed": 67,
+  "map_width": 35,
+  "map_height": 30,
+  "max_turns": 600,
+  "response_timeout": 10.0,
+  "port_start": 7900,
+  "agents": [
+    {
+      "name": "target-gpt",
+      "path": "/home/jupyter/til-26-surprise-shizhen-gpt",
+      "agent": "algo"
+    },
+    {
+      "name": "gpt-diplomacy",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-diplomacy-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "diplomacy"}
+    },
+    {
+      "name": "gpt-air-control",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-air-control-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "air-control"}
+    },
+    {
+      "name": "gpt-expansion-fortress",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-expansion-fortress-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "expansion-fortress"}
+    },
+    {
+      "name": "gpt-scout-vision",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-scout-vision-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "scout-vision"}
+    },
+    {
+      "name": "gpt-balanced",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/gpt-balanced-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "balanced"}
+    },
+    {
+      "name": "v1-resource",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-resource-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "resource"}
+    },
+    {
+      "name": "v1-diplomacy",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-diplomacy-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "diplomacy"}
+    },
+    {
+      "name": "v1-defense",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-defense-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "defense"}
+    },
+    {
+      "name": "v1-ground-rush",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-ground-rush-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "ground-rush"}
+    },
+    {
+      "name": "v1-air-control",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-air-control-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "air-control"}
+    },
+    {
+      "name": "v1-scout-vision",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-scout-vision-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "scout-vision"}
+    },
+    {
+      "name": "v1-base-assault",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-base-assault-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "base-assault"}
+    },
+    {
+      "name": "v1-infantry-swarm",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-infantry-swarm-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "infantry-swarm"}
+    },
+    {
+      "name": "v1-gold-bank",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-gold-bank-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "gold-bank"}
+    },
+    {
+      "name": "v1-balanced",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/v1-balanced-frozen",
+      "agent": "algo",
+      "env": {"BOT_TRAIT": "balanced"}
+    },
+    {
+      "name": "yilin-01",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-02",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-03",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    },
+    {
+      "name": "yilin-04",
+      "path": "/home/jupyter/shizhen-suprise-server/opponents/shizhen-yilin-frozen",
+      "agent": "algo"
+    }
+  ]
+}
